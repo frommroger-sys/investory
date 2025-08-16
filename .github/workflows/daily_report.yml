@@ -1,7 +1,7 @@
 name: Investory Daily Report (Diag)
 
 on:
-  workflow_dispatch: {}   # Nur manuell, bis alles läuft
+  workflow_dispatch: {}   # Manuell starten, bis alles stabil ist
   # schedule:
   #   - cron: "0 4 * * 1-5"   # 06:00 Europe/Zurich ~ 04:00 UTC (Sommerzeit)
 
@@ -23,9 +23,9 @@ jobs:
 
       - name: Show repo tree (debug)
         run: |
-          pwd
-          ls -la
-          python -V
+          echo "Working dir:"; pwd
+          echo "List files:"; ls -la
+          echo "Python version:"; python3 -V
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,48 +40,38 @@ jobs:
       - name: Diagnostics (assets + WP auth)
         run: |
           python - <<'PY'
-          import os, sys, requests, base64, json, traceback
+          import os, requests
 
-          def say(k,v): print(f"{k}: {v}")
-          def head(url):
+          def get(url, auth=None, label=""):
               try:
-                  r = requests.get(url, timeout=20)
-                  print(f"GET {url} -> {r.status_code} {len(r.content)} bytes")
-                  return r.status_code, r.content
+                  r = requests.get(url, auth=auth, timeout=20)
+                  print(f"{label}GET {url} -> {r.status_code}, {len(r.content)} bytes")
+                  if r.status_code not in (200, 201):
+                      print((r.text or "")[:300])
+                  return r
               except Exception as e:
-                  print(f"GET {url} ERROR:", e)
-                  return None, None
+                  print(f"{label}ERROR {url}: {e}")
 
-          # 1) Env present (NUR Namen, KEINE Werte)
-          for key in ["INV_WP_BASE","INV_WP_USER","INV_WP_APP_PW","INV_LOGO_URL","INV_POPPINS_REG_URL","INV_POPPINS_BOLD_URL"]:
-              print(f"ENV {key} set? ", "YES" if os.getenv(key) else "NO")
+          print("ENV check:")
+          for k in ["INV_WP_BASE","INV_WP_USER","INV_WP_APP_PW","INV_LOGO_URL","INV_POPPINS_REG_URL","INV_POPPINS_BOLD_URL"]:
+              print(f"  {k}: {'YES' if os.getenv(k) else 'NO'}")
 
-          # 2) Assets erreichbar?
-          for key in ["INV_LOGO_URL","INV_POPPINS_REG_URL","INV_POPPINS_BOLD_URL"]:
-              url = os.getenv(key)
-              if not url:
-                  print(f"{key} MISSING"); continue
-              head(url)
+          # Assets
+          for k in ["INV_LOGO_URL","INV_POPPINS_REG_URL","INV_POPPINS_BOLD_URL"]:
+              url = os.getenv(k)
+              if url:
+                  get(url, label="ASSET ")
 
-          # 3) WordPress API + Auth testen
-          base = os.getenv("INV_WP_BASE","").rstrip("/")
+          # WP endpoints
+          base = (os.getenv("INV_WP_BASE") or "").rstrip("/")
           user = os.getenv("INV_WP_USER")
           pw   = os.getenv("INV_WP_APP_PW")
-          if base and user and pw:
-              api_root = f"{base}/wp-json"
-              status,_ = head(api_root)
-              media = f"{base}/wp-json/wp/v2/media"
-              try:
-                  r = requests.get(media, auth=(user,pw), timeout=20)
-                  print(f"AUTH GET {media} -> {r.status_code}")
-                  # 401/403 deuten auf Auth-/Rechte-Problem
-                  if r.status_code not in (200, 201):
-                      print("AUTH RESPONSE SNIPPET:", r.text[:300])
-              except Exception as e:
-                  print("AUTH TEST ERROR:", e)
-          else:
-              print("WP VARS MISSING: base/user/pw")
 
+          if base and user and pw:
+              get(f"{base}/wp-json", label="WP   ")
+              get(f"{base}/wp-json/wp/v2/media", auth=(user,pw), label="AUTH ")
+          else:
+              print("WP VARS missing.")
           PY
 
       - name: Generate & upload PDF (pipeline)
@@ -90,11 +80,8 @@ jobs:
           import traceback
           try:
               import daily_report
-              report_data = {
-                "headline": ["Diagnoselauf – PDF sollte in WP erscheinen"],
-                "regions": {}
-              }
-              url = daily_report.run_pdf_pipeline(report_data)
+              # WICHTIG: ohne Argument aufrufen (Fix für TypeError)
+              url = daily_report.run_pdf_pipeline()
               print("RESULT_URL:", url)
           except Exception as e:
               print("PIPELINE ERROR:", e)
