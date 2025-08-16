@@ -1,0 +1,31 @@
+name: Daily Report
+
+on:
+  schedule:
+    - cron: "30 14 * * 4"   # Jeden Donnerstag um 14:30 Uhr Schweizer Zeit (12:30 UTC)
+  workflow_dispatch:       # Manuelles Starten möglich
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests reportlab
+
+      - name: Run daily_report.py
+        env:
+          INV_WP_BASE: ${{ secrets.INV_WP_BASE }}
+          INV_WP_USER: ${{ secrets.INV_WP_USER }}
+          INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
+          INV_LOGO_URL: ${{ secrets.INV_LOGO_URL }}
+          INV_POPPINS_REG_URL: ${{ secrets.INV_POPPINS_REG_URL }}
+          INV_POPPINS_BOLD_URL: ${{ secrets.INV_POPPINS_BOLD_URL }}
+        run: python daily_report.py
