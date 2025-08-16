@@ -2,14 +2,15 @@ name: Investory Daily Report
 
 on:
   schedule:
-    # 06:00 Europe/Zurich = 04:00 UTC (Sommerzeit)
+    # 06:00 Europe/Zurich ~ 04:00 UTC (Sommerzeit). GitHub CRON läuft in UTC.
     - cron: "0 4 * * 1-5"
-  workflow_dispatch: {}   # Manueller Start möglich
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
+    # Secrets stehen allen Steps zur Verfügung
     env:
       INV_WP_BASE:           ${{ secrets.INV_WP_BASE }}
       INV_WP_USER:           ${{ secrets.INV_WP_USER }}
@@ -21,6 +22,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show repo tree (debug)
+        run: |
+          pwd
+          ls -la
+          echo "Python file exists?"; test -f daily_report.py && echo "YES" || (echo "NO"; exit 1)
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,11 +42,17 @@ jobs:
       - name: Generate & upload PDF
         run: |
           python - <<'PY'
-          import daily_report
-          report_data = {
-            "headline": ["Testlauf – PDF sollte in WP erscheinen"],
-            "regions": {}
-          }
-          url = daily_report.run_pdf_pipeline(report_data)
-          print("RESULT_URL:", url)
+          import traceback
+          try:
+              import daily_report
+              report_data = {
+                  "headline": ["Testlauf – PDF sollte in WP erscheinen"],
+                  "regions": {}
+              }
+              url = daily_report.run_pdf_pipeline(report_data)
+              print("RESULT_URL:", url)
+          except Exception as e:
+              print("ERROR:", e)
+              traceback.print_exc()
+              raise
           PY
