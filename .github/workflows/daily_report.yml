@@ -1,15 +1,25 @@
-name: Daily Report
+name: Investory Daily Report
 
 on:
   schedule:
-    - cron: "30 14 * * 4"   # Jeden Donnerstag um 14:30 Uhr Schweizer Zeit (12:30 UTC)
-  workflow_dispatch:       # Manuelles Starten möglich
+    # 06:00 Europe/Zurich = 04:00 UTC (Sommerzeit)
+    - cron: "0 4 * * 1-5"
+  workflow_dispatch: {}   # Manueller Start möglich
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
+
+    env:
+      INV_WP_BASE:           ${{ secrets.INV_WP_BASE }}
+      INV_WP_USER:           ${{ secrets.INV_WP_USER }}
+      INV_WP_APP_PW:         ${{ secrets.INV_WP_APP_PW }}
+      INV_LOGO_URL:          ${{ secrets.INV_LOGO_URL }}
+      INV_POPPINS_REG_URL:   ${{ secrets.INV_POPPINS_REG_URL }}
+      INV_POPPINS_BOLD_URL:  ${{ secrets.INV_POPPINS_BOLD_URL }}
+
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -18,14 +28,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests reportlab
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests reportlab
 
-      - name: Run daily_report.py
-        env:
-          INV_WP_BASE: ${{ secrets.INV_WP_BASE }}
-          INV_WP_USER: ${{ secrets.INV_WP_USER }}
-          INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
-          INV_LOGO_URL: ${{ secrets.INV_LOGO_URL }}
-          INV_POPPINS_REG_URL: ${{ secrets.INV_POPPINS_REG_URL }}
-          INV_POPPINS_BOLD_URL: ${{ secrets.INV_POPPINS_BOLD_URL }}
-        run: python daily_report.py
+      - name: Generate & upload PDF
+        run: |
+          python - <<'PY'
+          import daily_report
+          report_data = {
+            "headline": ["Testlauf – PDF sollte in WP erscheinen"],
+            "regions": {}
+          }
+          url = daily_report.run_pdf_pipeline(report_data)
+          print("RESULT_URL:", url)
+          PY
