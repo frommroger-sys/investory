@@ -21,6 +21,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # NEU: Öffentliche IP des GitHub-Runners ermitteln (für Allowlist beim Hoster/WAF)
+      - name: Show egress IP of runner
+        run: |
+          echo "Runner public IPs:"
+          curl -s https://api.ipify.org ; echo
+          curl -s https://ifconfig.me ; echo
+
       - name: Show repo tree (debug)
         run: |
           echo "Working dir:"; pwd
@@ -80,7 +87,7 @@ jobs:
           import traceback
           try:
               import daily_report
-              # WICHTIG: ohne Argument aufrufen (Fix für TypeError)
+              # Wichtig: ohne Argument aufrufen
               url = daily_report.run_pdf_pipeline()
               print("RESULT_URL:", url)
           except Exception as e:
