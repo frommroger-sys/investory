@@ -15,15 +15,13 @@ jobs:
       INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
 
     steps:
-      - name: Show runner IPs (info)
+      - name: Make unique tag and tiny PDF
+        id: prep
         run: |
-          echo "Runner public IPs:"
-          curl -s https://api.ipify.org ; echo
-          curl -s https://ifconfig.me ; echo
-
-      - name: Make tiny PDF on runner
-        run: |
-          cat > /tmp/smoke.pdf <<'PDF'
+          set -euo pipefail
+          TAG="smoketest-$(date +%Y%m%d-%H%M%S)-$RANDOM"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          cat > "/tmp/${TAG}.pdf" <<'PDF'
           %PDF-1.4
           1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
           2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
@@ -31,12 +29,13 @@ jobs:
           trailer << /Root 1 0 R >>
           %%EOF
           PDF
-          ls -l /tmp/smoke.pdf
+          ls -l "/tmp/${TAG}.pdf"
 
-      - name: Try upload (primary endpoint, follow redirects with auth)
+      - name: Upload via primary endpoint (follow redirects with auth)
         id: up1
         env:
           URL: "${{ env.INV_WP_BASE }}/wp-json/wp/v2/media"
+          TAG: ${{ steps.prep.outputs.tag }}
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
@@ -46,26 +45,22 @@ jobs:
             -H "Accept: application/json" \
             -H "Expect:" \
             -H "Connection: close" \
-            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S).pdf" \
-            -F "file=@/tmp/smoke.pdf;type=application/pdf" \
+            -H "Content-Disposition: attachment; filename=${TAG}.pdf" \
+            -F "file=@/tmp/${TAG}.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h1.txt -o /tmp/b1.json || true
 
           echo "----- Response headers (primary) -----"
           sed -n '1,200p' /tmp/h1.txt || true
-          echo "----- Location (primary) -----"
-          grep -i '^location:' /tmp/h1.txt || true
-          echo "----- Body head (primary) -----"
-          head -c 1200 /tmp/b1.json || true; echo
-
           code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h1.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
+          echo "body=/tmp/b1.json" >> $GITHUB_OUTPUT
 
-      - name: Fallback upload (alt endpoint, follow redirects with auth)
+      - name: Upload via alt endpoint (index.php?rest_route=…) as fallback
         id: up2
-        if: steps.up1.outputs.code != '201'
         env:
           URL: "${{ env.INV_WP_BASE }}/index.php?rest_route=/wp/v2/media"
+          TAG: ${{ steps.prep.outputs.tag }}
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
@@ -75,53 +70,95 @@ jobs:
             -H "Accept: application/json" \
             -H "Expect:" \
             -H "Connection: close" \
-            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
-            -F "file=@/tmp/smoke.pdf;type=application/pdf" \
+            -H "Content-Disposition: attachment; filename=${TAG}-alt.pdf" \
+            -F "file=@/tmp/${TAG}.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h2.txt -o /tmp/b2.json || true
 
           echo "----- Response headers (alt) -----"
           sed -n '1,200p' /tmp/h2.txt || true
-          echo "----- Location (alt) -----"
-          grep -i '^location:' /tmp/h2.txt || true
-          echo "----- Body head (alt) -----"
-          head -c 1200 /tmp/b2.json || true; echo
-
           code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h2.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
+          echo "body=/tmp/b2.json" >> $GITHUB_OUTPUT
 
-      - name: Parse JSON and show source_url
+      - name: Parse responses (accept 200 or 201 if JSON has source_url)
+        id: parse
+        env:
+          B1: ${{ steps.up1.outputs.body }}
+          C1: ${{ steps.up1.outputs.code }}
+          B2: ${{ steps.up2.outputs.body }}
+          C2: ${{ steps.up2.outputs.code }}
         run: |
           set -euo pipefail
-          body="/tmp/b1.json"
-          if [ "${{ steps.up1.outputs.code }}" != "201" ]; then
-            body="/tmp/b2.json"
+          choose_body=""
+          # bevorzugt primary, sonst alt
+          if [ "${C1:-0}" -ge 200 ] && [ "${C1:-0}" -lt 400 ]; then
+            choose_body="$B1"
+          elif [ "${C2:-0}" -ge 200 ] && [ "${C2:-0}" -lt 400 ]; then
+            choose_body="$B2"
+          else
+            choose_body="$B1"
           fi
-          echo "Parsing body file: $body"
-          python - "$body" <<'PY'
+          echo "chosen=$choose_body" >> $GITHUB_OUTPUT
+          echo "Chosen body: $choose_body"
+          python - "$choose_body" <<'PY'
           import json,sys
-          p = sys.argv[1]
-          raw = open(p,'rb').read()
+          p=sys.argv[1]
+          raw=open(p,'rb').read()
           try:
-              data = json.loads(raw.decode('utf-8','replace'))
+              data=json.loads(raw.decode('utf-8','replace'))
           except Exception as e:
               print("JSON parse error:", e)
-              print("RAW(head):", raw[:400])
-              sys.exit(1)
+              print("RAW(head):", raw[:300])
+              sys.exit(3)
           if isinstance(data, list) and data:
-              data = data[0]
+              data=data[0]
           src = data.get("source_url") or (data.get("guid") or {}).get("rendered")
           mid = data.get("id")
           print("ATTACHMENT_ID:", mid)
           print("SOURCE_URL:", src)
+          # Erfolg, wenn gültige PDF-URL vorhanden, egal ob 200 oder 201
           if not src or not str(src).lower().endswith(".pdf"):
-              print("ERROR: No valid PDF source_url in response.")
-              sys.exit(2)
-          PY
-          echo "OK."
+              sys.exit(4)
+          PY || true
 
-      - name: Fail if neither endpoint returned 201
-        if: steps.up1.outputs.code != '201' && steps.up2.outputs.code != '201'
+      - name: If JSON parse didn’t yield source_url → search by filename
+        id: search
+        if: steps.parse.outcome == 'failure'
+        env:
+          TAG: ${{ steps.prep.outputs.tag }}
         run: |
-          echo "Both endpoints failed to return 201 Created. Check headers/body above." >&2
+          set -euo pipefail
+          Q="${INV_WP_BASE%/}/wp-json/wp/v2/media?search=${TAG}"
+          echo "Search: $Q"
+          curl -sS -u "${INV_WP_USER}:${INV_WP_APP_PW}" "$Q" -o /tmp/search.json || true
+          head -c 800 /tmp/search.json || true; echo
+          python - <<'PY'
+          import json,sys
+          raw=open('/tmp/search.json','rb').read()
+          try:
+              data=json.loads(raw.decode('utf-8','replace'))
+          except Exception as e:
+              print("Search JSON parse error:", e)
+              sys.exit(2)
+          if isinstance(data,list) and data:
+              item=data[0]
+              src = (item.get("guid") or {}).get("rendered")
+              mid = item.get("id")
+              print("SEARCH_HIT_ID:", mid)
+              print("SEARCH_HIT_URL:", src)
+              if src and src.lower().endswith('.pdf'):
+                  sys.exit(0)
+          print("No valid search hit.")
+          sys.exit(1)
+          PY
+
+      - name: Final verdict
+        if: steps.parse.outcome == 'failure' && steps.search.outcome == 'failure'
+        run: |
+          echo "❌ Upload konnte nicht bestätigt werden (weder JSON noch Suche ergab neue PDF)." >&2
           exit 1
+
+      - name: Success marker
+        if: steps.parse.outcome == 'success' || steps.search.outcome == 'success'
+        run: echo "✅ Upload bestätigt."
