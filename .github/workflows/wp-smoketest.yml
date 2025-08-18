@@ -3,13 +3,16 @@ name: WP Upload Smoke Test
 on:
   workflow_dispatch: {}   # Manuell starten
 
+permissions:
+  contents: read
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
     env:
-      INV_WP_BASE:  ${{ secrets.INV_WP_BASE }}
-      INV_WP_USER:  ${{ secrets.INV_WP_USER }}
-      INV_WP_APP_PW:${{ secrets.INV_WP_APP_PW }}
+      INV_WP_BASE:   ${{ secrets.INV_WP_BASE }}
+      INV_WP_USER:   ${{ secrets.INV_WP_USER }}
+      INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
 
     steps:
       - name: Show runner IPs (info)
@@ -30,33 +33,36 @@ jobs:
           PDF
           ls -l /tmp/smoke.pdf
 
-      - name: Try upload (primary endpoint, follow redirects)
+      - name: Try upload (primary endpoint, follow redirects with auth)
         id: up1
         env:
           URL: "${{ env.INV_WP_BASE }}/wp-json/wp/v2/media"
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          curl -i -L \
+          curl --http1.1 -sS -L --location-trusted \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
             -H "Accept: application/json" \
+            -H "Expect:" \
+            -H "Connection: close" \
             -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S).pdf" \
             -F "file=@/tmp/smoke.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h1.txt -o /tmp/b1.json || true
 
           echo "----- Response headers (primary) -----"
-          sed -n '1,200p' /tmp/h1.txt
+          sed -n '1,200p' /tmp/h1.txt || true
+          echo "----- Location (primary) -----"
+          grep -i '^location:' /tmp/h1.txt || true
+          echo "----- Body head (primary) -----"
+          head -c 1200 /tmp/b1.json || true; echo
 
-          echo "----- Response body (primary) -----"
-          head -c 800 /tmp/b1.json; echo
-
-          # Extract status code from headers
-          code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h1.txt)
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h1.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
           echo "body=/tmp/b1.json" >> $GITHUB_OUTPUT
 
-      - name: Fallback upload (alt endpoint) if primary != 201
+      - name: Upload via alt endpoint (index.php?rest_route=…) as fallback
         id: up2
         if: steps.up1.outputs.code != '201'
         env:
@@ -64,21 +70,25 @@ jobs:
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          curl -i -L \
+          curl --http1.1 -sS -L --location-trusted \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
             -H "Accept: application/json" \
-            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S).pdf" \
+            -H "Expect:" \
+            -H "Connection: close" \
+            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
             -F "file=@/tmp/smoke.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h2.txt -o /tmp/b2.json || true
 
           echo "----- Response headers (alt) -----"
-          sed -n '1,200p' /tmp/h2.txt
+          sed -n '1,200p' /tmp/h2.txt || true
+          echo "----- Location (alt) -----"
+          grep -i '^location:' /tmp/h2.txt || true
+          echo "----- Body head (alt) -----"
+          head -c 1200 /tmp/b2.json || true; echo
 
-          echo "----- Response body (alt) -----"
-          head -c 800 /tmp/b2.json; echo
-
-          code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h2.txt)
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h2.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
           echo "body=/tmp/b2.json" >> $GITHUB_OUTPUT
 
@@ -92,7 +102,6 @@ jobs:
         run: |
           set -euo pipefail
           choose_body=""
-          # bevorzugt primary, sonst alt
           if [ "${C1:-0}" -ge 200 ] && [ "${C1:-0}" -lt 400 ]; then
             choose_body="$B1"
           elif [ "${C2:-0}" -ge 200 ] && [ "${C2:-0}" -lt 400 ]; then
@@ -121,3 +130,9 @@ jobs:
               sys.exit(4)
           PY
           echo "OK."
+
+      - name: Final verdict (optional)
+        if: steps.up1.outputs.code == '0' && steps.up2.outputs.code == '0'
+        run: |
+          echo "No HTTP status captured. Check previous steps." >&2
+          exit 1
