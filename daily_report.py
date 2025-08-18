@@ -181,7 +181,6 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6), Spacer(1,4),
               Paragraph("© INVESTORY – Alle Rechte vorbehalten. Keine Haftung für die Richtigkeit der Daten.", styles["Normal"])]
     doc.build(story)
-    # Größe ausgeben
     try:
         size = os.path.getsize(out_path)
         debug(f"PDF saved ({size} bytes)")
