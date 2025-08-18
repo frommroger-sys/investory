@@ -1,86 +1,209 @@
-name: Investory Daily Report → GitHub Pages
+#!/usr/bin/env python3
+# coding: utf-8
+"""
+Investory – Daily Investment Report  (Local-only, ohne WP-Upload)
+→ Dies ist die ursprüngliche Version vor der Prompt-Erweiterung.
+"""
+import os, io, json, requests
+from datetime import datetime
+import pytz
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Image,
+                                Table, TableStyle, HRFlowable)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
 
-on:
-  workflow_dispatch: {}
-  schedule:
-    # 06:00 Europe/Zurich  (Sommer = 04 UTC, Winter = 05 UTC)
-    - cron: "0 4 * * 1-5"
-    - cron: "0 5 * * 1-5"
+# ---------------------------------------------------------------------------
+# Konstanten & Helfer
+# ---------------------------------------------------------------------------
+TZ = pytz.timezone("Europe/Zurich")
+UA = {"User-Agent": "Investory-Daily-Report/1.0 (+investory.ch)"}
+def now_local(): return datetime.now(TZ)
+def debug(msg):  print(f"[INVESTORY] {msg}")
 
-permissions:
-  contents: write
-  pages:    write
-  id-token: write
+LOGO_URL        = os.environ.get("INV_LOGO_URL")
+POPPINS_REG_URL = os.environ.get("INV_POPPINS_REG_URL")
+POPPINS_BOLD_URL= os.environ.get("INV_POPPINS_BOLD_URL")
+OAI_KEY         = os.environ.get("INV_OAI_API_KEY")
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def fetch_bytes(url: str) -> bytes:
+    r = requests.get(url, headers=UA, timeout=60)
+    r.raise_for_status()
+    return r.content
 
-    env:
-      INV_LOGO_URL:          ${{ secrets.INV_LOGO_URL }}
-      INV_POPPINS_REG_URL:   ${{ secrets.INV_POPPINS_REG_URL }}
-      INV_POPPINS_BOLD_URL:  ${{ secrets.INV_POPPINS_BOLD_URL }}
-      INV_OAI_API_KEY:       ${{ secrets.INV_OAI_API_KEY }}
+def register_poppins() -> bool:
+    try:
+        open("/tmp/Poppins-Regular.ttf","wb").write(fetch_bytes(POPPINS_REG_URL))
+        open("/tmp/Poppins-Bold.ttf","wb").write(fetch_bytes(POPPINS_BOLD_URL))
+        pdfmetrics.registerFont(TTFont("Poppins", "/tmp/Poppins-Regular.ttf"))
+        pdfmetrics.registerFont(TTFont("Poppins-Bold", "/tmp/Poppins-Bold.ttf"))
+        return True
+    except Exception as e:
+        debug(f"Poppins-Fallback (Helvetica). Reason: {e}")
+        return False
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+# ---------------------------------------------------------------------------
+# OpenAI  – **ursprünglicher kurzer Prompt**
+# ---------------------------------------------------------------------------
+def gen_report_data_via_openai() -> dict:
+    if not OAI_KEY:
+        debug("OpenAI key missing → fallback content.")
+        return {
+            "headline": ["(Fallback) Märkte stabil, Anleger warten auf neue Impulse."],
+            "regions": {k: {"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]} for k in ("CH","EU","US","AS")}
+        }
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    prompt = f"""
+Du bist ein erfahrener Finanzredakteur. Erstelle einen kompakten Investment-Überblick (Deutsch).
+Datum: {now_local().strftime('%Y-%m-%d')}
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests reportlab pillow pytz
+Gib **ausschließlich JSON** in folgender Struktur zurück:
+{{
+  "headline": ["..."],
+  "regions": {{
+    "CH": {{"tldr":[],"moves":[],"news":[["Kurztext","https://..."]],"analyst":[],"macro":[]}},
+    "EU": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
+    "US": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
+    "AS": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}}
+  }}
+}}
+Regeln: 2–5 Headlines; nur Plausibles; Links nur, wenn plausibel, sonst 'news' leer.
+"""
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {OAI_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": "gpt-4o-mini",
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": "Du bist ein präziser Finanzredakteur."},
+            {"role": "user",   "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1200
+    }
+    debug("OpenAI request …")
+    r = requests.post(url, headers=headers, json=body, timeout=60)
+    r.raise_for_status()
+    content = r.json()["choices"][0]["message"]["content"]
 
-      # ───────────────────────────────────────────────────────────────
-      # 1) PDF erzeugen
-      # ───────────────────────────────────────────────────────────────
-      - name: Generate PDF
-        run: |
-          python daily_report.py
+    try:
+        parsed = json.loads(content)
+    except Exception as e:
+        debug(f"OpenAI → kein JSON. Fallback. Reason: {e}")
+        parsed = {"headline": ["(OpenAI-Fehler) Marktüberblick nicht verfügbar."],
+                  "regions": {k: {"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]} for k in ("CH","EU","US","AS")}}
+    return parsed
 
-      # ───────────────────────────────────────────────────────────────
-      # 2) PDF in pages-Ordner kopieren  (dated + latest)
-      # ───────────────────────────────────────────────────────────────
-      - name: Copy PDF into pages folder
-        run: |
-          set -e
-          mkdir -p public/reports
+# ---------------------------------------------------------------------------
+# PDF-Builder  (unverändert)
+# ---------------------------------------------------------------------------
+def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
+    poppins_ok = register_poppins()
 
-          # Jüngstes Report-PDF in /tmp ermitteln
-          FILE=$(find /tmp -maxdepth 1 -type f -name 'Daily_Investment_Report_*.pdf' \
-                  -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontName = "Poppins" if poppins_ok else "Helvetica"
+    styles["Normal"].fontSize = 10.5
+    styles["Normal"].leading  = 14
 
-          if [ -z "$FILE" ]; then
-            echo "::error title=PDF not found::Kein Report-PDF in /tmp erzeugt."
-            ls -la /tmp
-            exit 1
-          fi
+    title_style = ParagraphStyle("TitleRight", parent=styles["Normal"],
+                                 alignment=2,
+                                 fontName="Poppins-Bold" if poppins_ok else "Helvetica-Bold",
+                                 fontSize=14.5, leading=18, textColor=colors.HexColor("#111"))
+    meta_style  = ParagraphStyle("Meta", parent=styles["Normal"],
+                                 alignment=2, fontSize=9.5, textColor=colors.HexColor("#666"))
+    h2   = ParagraphStyle("H2", parent=styles["Normal"],
+                          fontName=title_style.fontName,
+                          fontSize=12.2, leading=16,
+                          spaceBefore=6, spaceAfter=3,
+                          textColor=colors.HexColor("#0f2a5a"))
+    bullet = ParagraphStyle("Bullet", parent=styles["Normal"],
+                            leftIndent=10, bulletIndent=0, spaceAfter=3)
 
-          echo "Gefundenes PDF: $FILE"
-          cp "$FILE" public/reports/
-          cp "$FILE" public/Daily_Investment_Report_latest.pdf
+    def p_bullet(txt): return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
+    def p_link(txt, url):
+        return Paragraph(f"<bullet>&#8226;</bullet>{txt} "
+                         f"<font color='#0b5bd3'><u><link href='{url}'>Quelle</link></u></font>", bullet)
 
-      # ───────────────────────────────────────────────────────────────
-      # 3) Archiv auf 30 Dateien begrenzen
-      # ───────────────────────────────────────────────────────────────
-      - name: Keep only 30 newest PDFs
-        run: |
-          cd public/reports
-          ls -1t Daily_Investment_Report_*.pdf | tail -n +31 | xargs -r rm -f
-          cd ../../
+    # Header
+    img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
+    scale = (3.2 * cm) / iw
+    logo  = Image(io.BytesIO(logo_bytes), width=iw * scale, height=ih * scale)
+    title = Paragraph("Daily Investment Report", title_style)
+    stamp = Paragraph(f"Stand: {now_local().strftime('%d.%m.%Y, %H:%M')}", meta_style)
 
-      # ───────────────────────────────────────────────────────────────
-      # 4) Deploy nach gh-pages
-      # ───────────────────────────────────────────────────────────────
-      - name: Deploy 🚀
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
-          publish_branch: gh-pages
-          keep_files: true
+    doc = SimpleDocTemplate(out_path, pagesize=A4,
+                            leftMargin=1.7*cm, rightMargin=1.7*cm,
+                            topMargin=1.5*cm, bottomMargin=1.6*cm)
+
+    story = []
+    hdr   = Table([[logo, title], ["", stamp]],
+                  colWidths=[3.8*cm, 18.0*cm-3.8*cm])
+    hdr.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN",  (1,0), (1,0), "RIGHT"),
+        ("ALIGN",  (1,1), (1,1), "RIGHT"),
+        ("LEFTPADDING",  (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 4),
+    ]))
+    story += [hdr, Spacer(1,6),
+              HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
+              Spacer(1,8)]
+
+    # Inhalte
+    story += [Paragraph("Was heute zählt", h2)]
+    for s in report.get("headline", [])[:5]:
+        story.append(p_bullet(s))
+    story.append(Spacer(1,8))
+
+    def region(title_txt: str, data: dict):
+        story.append(Paragraph(title_txt, h2))
+        if data.get("tldr"):
+            story.append(p_bullet("<b>TL;DR:</b> " + "; ".join(data["tldr"])[:400]))
+        if data.get("moves"):
+            story.append(p_bullet("<b>Top Moves:</b> " + "; ".join(data["moves"])[:400]))
+        for item in (data.get("news") or [])[:8]:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                txt, url = item
+                story.append(p_link(f"<b>Unternehmensnews:</b> {txt}", url))
+        if data.get("analyst"):
+            story.append(p_bullet("<b>Analysten-Highlights:</b> " + "; ".join(data["analyst"])[:400]))
+        if data.get("macro"):
+            story.append(p_bullet("<b>Makro/Branche:</b> " + " ".join(data["macro"])[:400]))
+        story.append(Spacer(1,6))
+
+    for title_txt, key in [("1) Schweiz (SIX)","CH"), ("2) Europa ex CH","EU"),
+                           ("3) USA","US"), ("4) Asien","AS")]:
+        region(title_txt, report["regions"].get(key, {}))
+
+    story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
+              Spacer(1,4),
+              Paragraph("© INVESTORY – Alle Rechte vorbehalten. "
+                        "Keine Haftung für die Richtigkeit der Daten.",
+                        styles["Normal"])]
+
+    doc.build(story)
+    debug(f"PDF saved ({os.path.getsize(out_path)} bytes)")
+
+# ---------------------------------------------------------------------------
+# Pipeline (lokal erzeugen)
+# ---------------------------------------------------------------------------
+def run_pdf_pipeline():
+    report_data = gen_report_data_via_openai()
+    out_path = f"/tmp/Daily_Investment_Report_{now_local().strftime('%Y-%m-%d')}.pdf"
+    logo_bytes = fetch_bytes(LOGO_URL)
+    build_pdf(out_path, logo_bytes, report_data)
+    print("LOCAL_PDF_PATH:", out_path)
+    return out_path
+
+
+if __name__ == "__main__":
+    run_pdf_pipeline()
