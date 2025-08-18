@@ -1,4 +1,4 @@
-import os, io, json, requests
+import os, io, json, requests, random, string
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -50,6 +50,7 @@ def register_poppins() -> bool:
 
 # ---------------------- OpenAI -----------------------
 def gen_report_data_via_openai() -> dict:
+    # Minimaler Fallback wenn kein Key
     if not OAI_KEY:
         debug("OpenAI key missing → using fallback content.")
         return {
@@ -106,7 +107,6 @@ Regeln: 2–5 Headlines; nur Plausibles; Links nur wenn plausibel, sonst 'news' 
                         "US":{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]},
                         "AS":{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}}
         }
-    # Minimalvalidierung
     parsed.setdefault("headline", [])
     parsed.setdefault("regions", {})
     for k in ("CH","EU","US","AS"):
@@ -187,81 +187,102 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     except Exception:
         pass
 
-# ---------------------- WP Verify Helpers ------------
-def wp_get_media_by_id(media_id: str):
-    url = f"{WP_BASE}/wp-json/wp/v2/media/{media_id}"
-    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
-    return r.status_code, (r.json() if r.headers.get("content-type","").startswith("application/json") else r.text)
+# ---------------------- WP Helpers -------------------
+def wp_get_media_latest(n=5):
+    url = f"{WP_BASE}/wp-json/wp/v2/media?per_page={n}&orderby=date&order=desc"
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60, allow_redirects=False)
+    return r.status_code, r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
 
 def wp_search_media_by_filename(fname: str):
-    # WP-REST hat 'search', wir probieren damit (kann unscharf sein)
     url = f"{WP_BASE}/wp-json/wp/v2/media?search={fname}"
-    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
-    return r.status_code, (r.json() if r.headers.get("content-type","").startswith("application/json") else r.text)
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60, allow_redirects=False)
+    return r.status_code, r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
 
-# ---------------------- Upload -----------------------
-def wp_upload_media(file_path: str, title: str = None) -> str:
-    if not (WP_BASE and WP_USER and WP_APP_PASSWORD):
-        raise RuntimeError("WP ENV fehlt (INV_WP_BASE / INV_WP_USER / INV_WP_APP_PW).")
-
+# ---------------------- Upload (robust) ---------------
+def _upload_once(file_path: str, send_title: bool, filename_override: str = None):
     url = f"{WP_BASE}/wp-json/wp/v2/media"
-    fname = os.path.basename(file_path)
-    headers = {"User-Agent": "Investory-Report-Uploader/1.0"}
-    data = {}
-    if title:
-        data["title"] = title
+    orig_fname = os.path.basename(file_path)
+    fname = filename_override or orig_fname
+    headers = {"User-Agent": "Investory-Report-Uploader/1.0",
+               "Content-Disposition": f'attachment; filename="{fname}"'}
+    data = {"title": fname} if send_title else {}
 
-    debug(f"Upload → {url} as {fname}")
+    debug(f"Upload → {url} as {fname} (title={send_title})")
     with open(file_path, "rb") as f:
         files = {"file": (fname, f, "application/pdf")}
         r = requests.post(
             url,
             headers=headers,
-            files=files,   # Multipart!
+            files=files,
             data=data,
             auth=(WP_USER, WP_APP_PASSWORD),
             timeout=60,
+            allow_redirects=False,
         )
 
     debug(f"Upload status: {r.status_code}")
+    debug(f"Upload final URL: {getattr(r, 'url', 'n/a')}")
+    if getattr(r, "history", None):
+        debug("Redirect history:")
+        for h in r.history:
+            debug(f" - {h.status_code} → {h.headers.get('Location')}")
     if r.status_code not in (200, 201):
         snippet = (r.text or "")[:400]
         debug(f"Upload body (snippet): {snippet}")
 
-    # Header-ID greifbar machen
     attach_id = r.headers.get("x-wp-upload-attachment-id")
     if attach_id:
         debug(f"x-wp-upload-attachment-id: {attach_id}")
 
     try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        raise RuntimeError(f"WP upload failed {r.status_code}: {(r.text or '')[:400]}") from e
-
-    try:
-        resp = r.json()
+        body = r.json()
     except ValueError:
-        raise RuntimeError(f"WP returned non-JSON response: {r.status_code}")
+        body = {"raw": (r.text or "")[:400]}
+    return r.status_code, attach_id, body
 
-    if isinstance(resp, list) and resp:
-        resp = resp[0]
+def wp_upload_media(file_path: str) -> str:
+    # Versuch 1: „sauberer“ Upload ohne Title-Meta
+    st, attach_id, body = _upload_once(file_path, send_title=False)
+    # Versuch 2 (Fallback), falls nicht 201: minimalistisch + eindeutiger Name
+    if st != 201:
+        # eindeutiger Dateiname
+        suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        base = f"Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{suffix}.pdf"
+        debug(f"Retry upload with unique name: {base}")
+        st, attach_id, body = _upload_once(file_path, send_title=False, filename_override=base)
 
-    source_url = resp.get("source_url") or (resp.get("guid") or {}).get("rendered")
+    # Body interpretieren
+    if isinstance(body, list) and body:
+        body = body[0]
+
+    # Quelle extrahieren
+    source_url = None
+    if isinstance(body, dict):
+        source_url = body.get("source_url") or (body.get("guid") or {}).get("rendered")
+        # zusätzliche Debug-Infos
+        name_in_body = body.get("title", {}).get("rendered") or body.get("slug")
+        debug(f"Body title/slug: {name_in_body}")
+
+    debug(f"source_url (API): {source_url}")
+
+    # Wenn API eine „falsche“ URL liefert, mit Mediensuche gegenchecken
+    fname_expect = (body.get("title", {}) or {}).get("rendered") or os.path.basename(file_path)
+    st2, latest = wp_get_media_latest(5)
+    if isinstance(latest, list) and latest:
+        debug("Latest media:")
+        for it in latest[:5]:
+            debug(f" - {it.get('id')} : {(it.get('guid') or {}).get('rendered')}")
+
+    st3, found = wp_search_media_by_filename("Daily_Investment_Report_")
+    if isinstance(found, list) and found:
+        # Nimm den neuesten Treffer als „wahr“
+        corrected = (found[0].get("guid") or {}).get("rendered")
+        debug(f"Search match (guid): {corrected}")
+        if corrected and corrected.endswith(".pdf"):
+            source_url = corrected
+
     if not source_url:
-        raise RuntimeError(f"No source_url in WP response: {resp}")
-    debug(f"source_url: {source_url}")
-
-    # Nachverifikation: per ID oder Dateiname
-    if attach_id:
-        st, body = wp_get_media_by_id(attach_id)
-        debug(f"Verify by ID → {st}")
-        if isinstance(body, dict):
-            debug(f"Verify guid: {(body.get('guid') or {}).get('rendered')}")
-    else:
-        st, body = wp_search_media_by_filename(fname)
-        debug(f"Verify by search('{fname}') → {st}")
-        if isinstance(body, list) and body:
-            debug(f"First match guid: {(body[0].get('guid') or {}).get('rendered')}")
+        raise RuntimeError(f"No valid source_url found. Body: {body}")
 
     return source_url
 
@@ -270,15 +291,19 @@ def run_pdf_pipeline():
     # 1) Inhalte holen
     report_data = gen_report_data_via_openai()
 
-    # 2) Assets laden & PDF bauen
+    # 2) PDF bauen
     out_path = f"/tmp/Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     logo_bytes = fetch_bytes(LOGO_URL)
     build_pdf(out_path, logo_bytes, report_data)
+    try:
+        size = os.path.getsize(out_path)
+        debug(f"PDF on disk: {out_path} ({size} bytes)")
+    except Exception:
+        pass
 
-    # 3) Upload
-    public_url = wp_upload_media(out_path, title=os.path.basename(out_path))
+    # 3) Upload (robust)
+    public_url = wp_upload_media(out_path)
     print("PUBLIC_PDF_URL:", public_url)
-    # Für das Artifact-Upload im Workflow: Pfad nochmal ausgeben
     print("LOCAL_PDF_PATH:", out_path)
     return public_url
 
