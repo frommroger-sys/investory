@@ -11,7 +11,7 @@ from reportlab.lib.utils import ImageReader
 
 UA = {"User-Agent": "Investory-Daily-Report/1.0 (+investory.ch)"}
 
-# --- Secrets & Assets (aus Agent-Variablen / GitHub Secrets) ---
+# --- ENV / Secrets ---
 WP_BASE         = (os.environ.get("INV_WP_BASE") or "").rstrip("/")
 WP_USER         = os.environ.get("INV_WP_USER")
 WP_APP_PASSWORD = os.environ.get("INV_WP_APP_PW")
@@ -22,39 +22,34 @@ POPPINS_BOLD_URL= os.environ.get("INV_POPPINS_BOLD_URL")
 
 OAI_KEY         = os.environ.get("INV_OAI_API_KEY")  # OpenAI API Key
 
+def debug(msg):  # kompakte Debug-Ausgabe
+    print(f"[INVESTORY] {msg}")
+
 # ---------------------- Helpers ----------------------
 def fetch_bytes(url: str) -> bytes:
+    debug(f"GET asset: {url}")
     r = requests.get(url, headers=UA, timeout=60)
+    debug(f" -> {r.status_code}, {len(r.content)} bytes")
     r.raise_for_status()
     return r.content
 
-def register_poppins():
+def register_poppins() -> bool:
     ok = True
     try:
         open("/tmp/Poppins-Regular.ttf","wb").write(fetch_bytes(POPPINS_REG_URL))
         open("/tmp/Poppins-Bold.ttf","wb").write(fetch_bytes(POPPINS_BOLD_URL))
         pdfmetrics.registerFont(TTFont("Poppins", "/tmp/Poppins-Regular.ttf"))
         pdfmetrics.registerFont(TTFont("Poppins-Bold", "/tmp/Poppins-Bold.ttf"))
-    except Exception:
-        # Fallback auf Helvetica, wenn Fonts fehlen
+        debug("Poppins registered ✓")
+    except Exception as e:
         ok = False
+        debug(f"Poppins fallback (Helvetica). Reason: {e}")
     return ok
 
 # ---------------------- OpenAI -----------------------
 def gen_report_data_via_openai() -> dict:
-    """
-    Holt strukturierte Inhalte für den Report als JSON.
-    Erwartete Struktur:
-    {
-      "headline": ["...","..."],
-      "regions": {
-        "CH": {"tldr":[...], "moves":[...], "news":[["Text","URL"],...], "analyst":[...], "macro":[...]},
-        "EU": {...}, "US": {...}, "AS": {...}
-      }
-    }
-    """
     if not OAI_KEY:
-        # Minimaler Fallback, falls kein Key gesetzt
+        debug("OpenAI key missing → using fallback content.")
         return {
             "headline": ["(Fallback) Märkte stabil, Anleger warten auf neue Impulse."],
             "regions": {
@@ -66,32 +61,20 @@ def gen_report_data_via_openai() -> dict:
         }
 
     prompt = f"""
-Du bist ein erfahrener Finanzredakteur. Erstelle einen sehr kompakten Investment-Überblick für einen PDF-Tagesreport.
+Du bist ein erfahrener Finanzredakteur. Erstelle einen kompakten Investment-Überblick (DE).
 Datum: {datetime.now().strftime('%Y-%m-%d')}
-Sprache: Deutsch, Ton: sachlich, prägnant, ohne Floskeln.
-
-Gib die Antwort **ausschließlich** als JSON mit genau diesem Schema zurück:
+Gib ausschließlich JSON wie folgt zurück:
 {{
-  "headline": ["ein Satz", "ein Satz", "..."],
+  "headline": ["..."],
   "regions": {{
-    "CH": {{
-      "tldr": ["max. 3 kurze Punkte"],
-      "moves": ["max. 3 Top Moves an SIX"],
-      "news": [["Unternehmensmeldung kurz", "https://quelle.tld"], ["...", "https://..."]],
-      "analyst": ["max. 2 Highlights"],
-      "macro": ["max. 2 Sätze zu Makro/Branche"]
-    }},
-    "EU": {{ ... gleiches Schema ... }},
-    "US": {{ ... }},
-    "AS": {{ ... (JP,TW,HK) ... }}
+    "CH": {{"tldr":[],"moves":[],"news":[["Kurztext","https://..."]],"analyst":[],"macro":[]}},
+    "EU": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
+    "US": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
+    "AS": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}}
   }}
 }}
-Regeln:
-- Headlines: 2–5 kurze Sätze insgesamt.
-- Keine doppelten Inhalte, keine Erfindungen. Wenn unsicher, weglassen.
-- Links nur, wenn plausibel; sonst das Feld 'news' leerlassen.
+Regeln: 2–5 Headlines; nur Plausibles; Links nur wenn plausibel, sonst 'news' leer.
 """
-    # Wir nutzen die Chat Completions API direkt per HTTP (robust gegen SDK-Versionen)
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {OAI_KEY}", "Content-Type": "application/json"}
     body = {
@@ -104,14 +87,16 @@ Regeln:
         "temperature": 0.3,
         "max_tokens": 1200
     }
+    debug("OpenAI request → chat.completions")
     r = requests.post(url, headers=headers, json=body, timeout=60)
+    debug(f"OpenAI status: {r.status_code}")
     r.raise_for_status()
-    data = r.json()
-    content = data["choices"][0]["message"]["content"]
+    content = r.json()["choices"][0]["message"]["content"]
     try:
         parsed = json.loads(content)
-    except Exception:
-        # Falls unerwartet kein valides JSON geliefert wird
+        debug(f"OpenAI JSON parsed. Headlines: {len(parsed.get('headline', []))}")
+    except Exception as e:
+        debug(f"OpenAI response not JSON. Fallback. Reason: {e}")
         parsed = {
             "headline": ["(OpenAI-Fehler) Kompakter Marktüberblick nicht verfügbar."],
             "regions": {"CH":{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]},
@@ -128,8 +113,9 @@ Regeln:
 
 # ---------------------- PDF Builder ------------------
 def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
-    # Fonts
+    debug(f"PDF → {out_path}")
     poppins_ok = register_poppins()
+
     styles = getSampleStyleSheet()
     styles["Normal"].fontName = "Poppins" if poppins_ok else "Helvetica"
     styles["Normal"].fontSize = 10.5
@@ -150,7 +136,7 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
         return Paragraph(f"<bullet>&#8226;</bullet>{txt} "
                          f"<font color='#0b5bd3'><u><link href='{url}'>Quelle</link></u></font>", bullet)
 
-    # Header mit proportionalem Logo
+    # Header
     img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
     target_w = 3.2*cm; scale = target_w / iw
     logo = Image(io.BytesIO(logo_bytes), width=iw*scale, height=ih*scale)
@@ -193,6 +179,12 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6), Spacer(1,4),
               Paragraph("© INVESTORY – Alle Rechte vorbehalten. Keine Haftung für die Richtigkeit der Daten.", styles["Normal"])]
     doc.build(story)
+    # Größe ausgeben
+    try:
+        size = os.path.getsize(out_path)
+        debug(f"PDF saved ({size} bytes)")
+    except Exception:
+        pass
 
 # ---------------------- Upload -----------------------
 def wp_upload_media(file_path: str, title: str = None) -> str:
@@ -201,48 +193,4 @@ def wp_upload_media(file_path: str, title: str = None) -> str:
 
     url = f"{WP_BASE}/wp-json/wp/v2/media"
     fname = os.path.basename(file_path)
-    headers = {"User-Agent": "Investory-Report-Uploader/1.0"}
-    data = {}
-    if title:
-        data["title"] = title
-
-    with open(file_path, "rb") as f:
-        files = {"file": (fname, f, "application/pdf")}
-        r = requests.post(url, headers=headers, files=files, data=data, auth=(WP_USER, WP_APP_PASSWORD), timeout=60)
-
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        snippet = (r.text or "")[:400]
-        raise RuntimeError(f"WP upload failed {r.status_code}: {snippet}") from e
-
-    try:
-        resp = r.json()
-    except ValueError:
-        raise RuntimeError(f"WP returned non-JSON response: {r.status_code}")
-
-    if isinstance(resp, list) and resp:
-        resp = resp[0]
-
-    source_url = resp.get("source_url") or (resp.get("guid") or {}).get("rendered")
-    if not source_url:
-        raise RuntimeError(f"No source_url in WP response: {resp}")
-    return source_url
-
-# ---------------------- Pipeline ---------------------
-def run_pdf_pipeline():
-    # 1) Inhalte holen
-    report_data = gen_report_data_via_openai()
-
-    # 2) Assets laden & PDF bauen
-    logo_bytes = fetch_bytes(LOGO_URL)
-    out_path = f"/tmp/Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    build_pdf(out_path, logo_bytes, report_data)
-
-    # 3) Upload
-    public_url = wp_upload_media(out_path, title=os.path.basename(out_path))
-    print("PUBLIC_PDF_URL:", public_url)
-    return public_url
-
-if __name__ == "__main__":
-    run_pdf_pipeline()
+    headers = {"User-Agent": "Investory-Report-Uploader/1.
