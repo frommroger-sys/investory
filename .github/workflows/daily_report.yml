@@ -1,7 +1,7 @@
 name: Investory Daily Report (Diag)
 
 on:
-  workflow_dispatch: {}   # Manuell starten, bis alles stabil ist
+  workflow_dispatch: {}
   # schedule:
   #   - cron: "0 4 * * 1-5"   # 06:00 Europe/Zurich ~ 04:00 UTC (Sommerzeit)
 
@@ -21,7 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # NEU: Öffentliche IP des GitHub-Runners ermitteln (für Allowlist beim Hoster/WAF)
       - name: Show egress IP of runner
         run: |
           echo "Runner public IPs:"
@@ -42,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests reportlab
+          pip install requests reportlab pillow
 
       - name: Diagnostics (assets + WP auth)
         run: |
@@ -87,7 +86,6 @@ jobs:
           import traceback
           try:
               import daily_report
-              # Wichtig: ohne Argument aufrufen
               url = daily_report.run_pdf_pipeline()
               print("RESULT_URL:", url)
           except Exception as e:
