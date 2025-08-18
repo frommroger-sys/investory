@@ -40,7 +40,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          curl -i -L \
+          # -L folgt Redirects, -D schreibt NUR Header, -o NUR Body (kein -i!)
+          curl -sS -L \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
             -H "Accept: application/json" \
             -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S).pdf" \
@@ -49,12 +50,12 @@ jobs:
             -D /tmp/h1.txt -o /tmp/b1.json || true
 
           echo "----- Response headers (primary) -----"
-          sed -n '1,200p' /tmp/h1.txt
+          sed -n '1,200p' /tmp/h1.txt || true
 
-          echo "----- Response body (primary) -----"
-          head -c 1200 /tmp/b1.json; echo
+          echo "----- Response body (primary, first 800B) -----"
+          head -c 800 /tmp/b1.json || true; echo
 
-          code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h1.txt)
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h1.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
 
       - name: Fallback upload (alt endpoint) if primary != 201
@@ -65,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          curl -i -L \
+          curl -sS -L \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
             -H "Accept: application/json" \
             -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
@@ -74,12 +75,12 @@ jobs:
             -D /tmp/h2.txt -o /tmp/b2.json || true
 
           echo "----- Response headers (alt) -----"
-          sed -n '1,200p' /tmp/h2.txt
+          sed -n '1,200p' /tmp/h2.txt || true
 
-          echo "----- Response body (alt) -----"
-          head -c 1200 /tmp/b2.json; echo
+          echo "----- Response body (alt, first 800B) -----"
+          head -c 800 /tmp/b2.json || true; echo
 
-          code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h2.txt)
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h2.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
 
       - name: Parse JSON and show source_url
@@ -93,13 +94,12 @@ jobs:
           python - "$body" <<'PY'
           import json,sys
           p = sys.argv[1]
-          with open(p,'rb') as f:
-              raw = f.read()
+          raw = open(p,'rb').read()
           try:
               data = json.loads(raw.decode('utf-8','replace'))
           except Exception as e:
               print("JSON parse error:", e)
-              print("RAW:", raw[:400])
+              print("RAW(head):", raw[:400])
               sys.exit(1)
 
           if isinstance(data, list) and data:
