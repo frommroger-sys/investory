@@ -187,6 +187,18 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     except Exception:
         pass
 
+# ---------------------- WP Verify Helpers ------------
+def wp_get_media_by_id(media_id: str):
+    url = f"{WP_BASE}/wp-json/wp/v2/media/{media_id}"
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
+    return r.status_code, (r.json() if r.headers.get("content-type","").startswith("application/json") else r.text)
+
+def wp_search_media_by_filename(fname: str):
+    # WP-REST hat 'search', wir probieren damit (kann unscharf sein)
+    url = f"{WP_BASE}/wp-json/wp/v2/media?search={fname}"
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
+    return r.status_code, (r.json() if r.headers.get("content-type","").startswith("application/json") else r.text)
+
 # ---------------------- Upload -----------------------
 def wp_upload_media(file_path: str, title: str = None) -> str:
     if not (WP_BASE and WP_USER and WP_APP_PASSWORD):
@@ -216,6 +228,11 @@ def wp_upload_media(file_path: str, title: str = None) -> str:
         snippet = (r.text or "")[:400]
         debug(f"Upload body (snippet): {snippet}")
 
+    # Header-ID greifbar machen
+    attach_id = r.headers.get("x-wp-upload-attachment-id")
+    if attach_id:
+        debug(f"x-wp-upload-attachment-id: {attach_id}")
+
     try:
         r.raise_for_status()
     except requests.HTTPError as e:
@@ -233,6 +250,19 @@ def wp_upload_media(file_path: str, title: str = None) -> str:
     if not source_url:
         raise RuntimeError(f"No source_url in WP response: {resp}")
     debug(f"source_url: {source_url}")
+
+    # Nachverifikation: per ID oder Dateiname
+    if attach_id:
+        st, body = wp_get_media_by_id(attach_id)
+        debug(f"Verify by ID → {st}")
+        if isinstance(body, dict):
+            debug(f"Verify guid: {(body.get('guid') or {}).get('rendered')}")
+    else:
+        st, body = wp_search_media_by_filename(fname)
+        debug(f"Verify by search('{fname}') → {st}")
+        if isinstance(body, list) and body:
+            debug(f"First match guid: {(body[0].get('guid') or {}).get('rendered')}")
+
     return source_url
 
 # ---------------------- Pipeline ---------------------
@@ -241,13 +271,15 @@ def run_pdf_pipeline():
     report_data = gen_report_data_via_openai()
 
     # 2) Assets laden & PDF bauen
-    logo_bytes = fetch_bytes(LOGO_URL)
     out_path = f"/tmp/Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    logo_bytes = fetch_bytes(LOGO_URL)
     build_pdf(out_path, logo_bytes, report_data)
 
     # 3) Upload
     public_url = wp_upload_media(out_path, title=os.path.basename(out_path))
     print("PUBLIC_PDF_URL:", public_url)
+    # Für das Artifact-Upload im Workflow: Pfad nochmal ausgeben
+    print("LOCAL_PDF_PATH:", out_path)
     return public_url
 
 if __name__ == "__main__":
