@@ -1,15 +1,18 @@
-name: WP Upload Smoke Test
+name: WP Upload Smoketest
 
 on:
-  workflow_dispatch: {}   # Manuell starten
+  workflow_dispatch: {}    # Manuell starten
+
+permissions:
+  contents: read
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     env:
-      INV_WP_BASE:  ${{ secrets.INV_WP_BASE }}
-      INV_WP_USER:  ${{ secrets.INV_WP_USER }}
-      INV_WP_APP_PW:${{ secrets.INV_WP_APP_PW }}
+      INV_WP_BASE:   ${{ secrets.INV_WP_BASE }}
+      INV_WP_USER:   ${{ secrets.INV_WP_USER }}
+      INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
 
     steps:
       - name: Show runner IPs (info)
@@ -49,9 +52,8 @@ jobs:
           sed -n '1,200p' /tmp/h1.txt
 
           echo "----- Response body (primary) -----"
-          head -c 800 /tmp/b1.json; echo
+          head -c 1200 /tmp/b1.json; echo
 
-          # Extract status code from headers
           code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h1.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
 
@@ -66,7 +68,7 @@ jobs:
           curl -i -L \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
             -H "Accept: application/json" \
-            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S).pdf" \
+            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
             -F "file=@/tmp/smoke.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h2.txt -o /tmp/b2.json || true
@@ -75,7 +77,7 @@ jobs:
           sed -n '1,200p' /tmp/h2.txt
 
           echo "----- Response body (alt) -----"
-          head -c 800 /tmp/b2.json; echo
+          head -c 1200 /tmp/b2.json; echo
 
           code=$(awk 'toupper($1)=="HTTP/2"||toupper($1)=="HTTP/1.1"{c=$2} END{print c+0}' /tmp/h2.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
@@ -89,14 +91,15 @@ jobs:
           fi
 
           python - <<'PY'
-          import json,sys,os
+          import json,sys
           p=sys.argv[1]
+          with open(p,'rb') as f:
+              raw=f.read()
           try:
-              with open(p,'rb') as f:
-                  data=json.load(f)
+              data=json.loads(raw.decode('utf-8','replace'))
           except Exception as e:
               print("JSON parse error:", e)
-              print("Raw head:", open(p,'rb').read(400))
+              print("RAW:", raw[:400])
               sys.exit(1)
 
           if isinstance(data, list) and data:
