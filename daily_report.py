@@ -50,7 +50,6 @@ def register_poppins() -> bool:
 
 # ---------------------- OpenAI -----------------------
 def gen_report_data_via_openai() -> dict:
-    # Minimaler Fallback wenn kein Key
     if not OAI_KEY:
         debug("OpenAI key missing → using fallback content.")
         return {
@@ -190,96 +189,112 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
 # ---------------------- WP Helpers -------------------
 def wp_get_media_latest(n=5):
     url = f"{WP_BASE}/wp-json/wp/v2/media?per_page={n}&orderby=date&order=desc"
-    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60, allow_redirects=False)
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
     return r.status_code, r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
 
 def wp_search_media_by_filename(fname: str):
     url = f"{WP_BASE}/wp-json/wp/v2/media?search={fname}"
-    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60, allow_redirects=False)
+    r = requests.get(url, auth=(WP_USER, WP_APP_PASSWORD), headers=UA, timeout=60)
     return r.status_code, r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
 
-# ---------------------- Upload (robust) ---------------
-def _upload_once(file_path: str, send_title: bool, filename_override: str = None):
-    url = f"{WP_BASE}/wp-json/wp/v2/media"
+# ---------------------- Upload (robust + redirects) --
+def _upload_once(file_path: str, filename_override: str = None, endpoint_variant: int = 1):
+    """
+    endpoint_variant:
+      1 = /wp-json/wp/v2/media
+      2 = /index.php?rest_route=/wp/v2/media  (Bypass nginx/rewrites)
+    """
+    if endpoint_variant == 1:
+        url = f"{WP_BASE}/wp-json/wp/v2/media"
+    else:
+        url = f"{WP_BASE}/index.php?rest_route=/wp/v2/media"
+
     orig_fname = os.path.basename(file_path)
     fname = filename_override or orig_fname
-    headers = {"User-Agent": "Investory-Report-Uploader/1.0",
-               "Content-Disposition": f'attachment; filename="{fname}"'}
-    data = {"title": fname} if send_title else {}
 
-    debug(f"Upload → {url} as {fname} (title={send_title})")
+    headers = {
+        "User-Agent": "Investory-Report-Uploader/1.0",
+        "Accept": "application/json",
+        # Content-Disposition ist optional; Requests setzt Boundary & Multipart korrekt.
+        "Content-Disposition": f'attachment; filename="{fname}"'
+    }
+
+    debug(f"Upload → {url} as {fname} (variant={endpoint_variant})")
     with open(file_path, "rb") as f:
         files = {"file": (fname, f, "application/pdf")}
         r = requests.post(
             url,
             headers=headers,
             files=files,
-            data=data,
             auth=(WP_USER, WP_APP_PASSWORD),
             timeout=60,
-            allow_redirects=False,
+            allow_redirects=True,   # << Redirects jetzt erlaubt
         )
 
     debug(f"Upload status: {r.status_code}")
-    debug(f"Upload final URL: {getattr(r, 'url', 'n/a')}")
     if getattr(r, "history", None):
         debug("Redirect history:")
         for h in r.history:
             debug(f" - {h.status_code} → {h.headers.get('Location')}")
-    if r.status_code not in (200, 201):
-        snippet = (r.text or "")[:400]
-        debug(f"Upload body (snippet): {snippet}")
 
-    attach_id = r.headers.get("x-wp-upload-attachment-id")
-    if attach_id:
-        debug(f"x-wp-upload-attachment-id: {attach_id}")
-
+    body = None
     try:
         body = r.json()
     except ValueError:
         body = {"raw": (r.text or "")[:400]}
-    return r.status_code, attach_id, body
+
+    return r.status_code, body
 
 def wp_upload_media(file_path: str) -> str:
-    # Versuch 1: „sauberer“ Upload ohne Title-Meta
-    st, attach_id, body = _upload_once(file_path, send_title=False)
-    # Versuch 2 (Fallback), falls nicht 201: minimalistisch + eindeutiger Name
-    if st != 201:
-        # eindeutiger Dateiname
-        suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        base = f"Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{suffix}.pdf"
-        debug(f"Retry upload with unique name: {base}")
-        st, attach_id, body = _upload_once(file_path, send_title=False, filename_override=base)
+    # 1) normaler Endpoint, Originalname
+    st, body = _upload_once(file_path, endpoint_variant=1)
 
-    # Body interpretieren
+    # 2) falls nicht 201 → alternativer Endpoint (index.php?rest_route=…)
+    if st != 201:
+        debug("Retry on alt endpoint (index.php?rest_route=/wp/v2/media)")
+        st, body = _upload_once(file_path, endpoint_variant=2)
+
+    # 3) falls immer noch nicht 201 → eindeutiger Name probieren (beide Endpoints)
+    if st != 201:
+        unique = f"Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{''.join(random.choices(string.ascii_lowercase+string.digits, k=6))}.pdf"
+        debug(f"Retry with unique name on main endpoint: {unique}")
+        st, body = _upload_once(file_path, filename_override=unique, endpoint_variant=1)
+        if st != 201:
+            debug("Retry with unique name on alt endpoint.")
+            st, body = _upload_once(file_path, filename_override=unique, endpoint_variant=2)
+
+    # --- Ergebnis interpretieren ---
     if isinstance(body, list) and body:
         body = body[0]
 
-    # Quelle extrahieren
     source_url = None
     if isinstance(body, dict):
         source_url = body.get("source_url") or (body.get("guid") or {}).get("rendered")
-        # zusätzliche Debug-Infos
-        name_in_body = body.get("title", {}).get("rendered") or body.get("slug")
-        debug(f"Body title/slug: {name_in_body}")
+        debug(f"API source_url: {source_url}")
+        if body.get("raw"):
+            debug(f"API raw snippet: {body['raw'][:200]}")
 
-    debug(f"source_url (API): {source_url}")
+    # Wenn die API wieder Mumpitz liefert → verifizieren/finden
+    if not source_url:
+        debug("No source_url in API response → verify via list/search")
+        st2, latest = wp_get_media_latest(5)
+        if isinstance(latest, list) and latest:
+            debug("Latest media:")
+            for it in latest:
+                debug(f" - {it.get('id')} : {(it.get('guid') or {}).get('rendered')}")
+            # nimm ersten PDF-Eintrag aus 'latest'
+            for it in latest:
+                guid = (it.get('guid') or {}).get('rendered') or ""
+                if guid.lower().endswith(".pdf"):
+                    source_url = guid
+                    break
 
-    # Wenn API eine „falsche“ URL liefert, mit Mediensuche gegenchecken
-    fname_expect = (body.get("title", {}) or {}).get("rendered") or os.path.basename(file_path)
-    st2, latest = wp_get_media_latest(5)
-    if isinstance(latest, list) and latest:
-        debug("Latest media:")
-        for it in latest[:5]:
-            debug(f" - {it.get('id')} : {(it.get('guid') or {}).get('rendered')}")
-
-    st3, found = wp_search_media_by_filename("Daily_Investment_Report_")
-    if isinstance(found, list) and found:
-        # Nimm den neuesten Treffer als „wahr“
-        corrected = (found[0].get("guid") or {}).get("rendered")
-        debug(f"Search match (guid): {corrected}")
-        if corrected and corrected.endswith(".pdf"):
-            source_url = corrected
+        if not source_url:
+            st3, found = wp_search_media_by_filename("Daily_Investment_Report_")
+            if isinstance(found, list) and found:
+                corrected = (found[0].get("guid") or {}).get("rendered")
+                debug(f"Search match guid: {corrected}")
+                source_url = corrected
 
     if not source_url:
         raise RuntimeError(f"No valid source_url found. Body: {body}")
@@ -301,7 +316,7 @@ def run_pdf_pipeline():
     except Exception:
         pass
 
-    # 3) Upload (robust)
+    # 3) Upload (robust, mit Redirect-Handling und Alt-Route)
     public_url = wp_upload_media(out_path)
     print("PUBLIC_PDF_URL:", public_url)
     print("LOCAL_PDF_PATH:", out_path)
