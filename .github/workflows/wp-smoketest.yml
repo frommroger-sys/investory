@@ -33,32 +33,35 @@ jobs:
           PDF
           ls -l /tmp/smoke.pdf
 
-      - name: Try upload (primary endpoint, follow redirects)
+      - name: Try upload (primary endpoint, follow redirects with auth)
         id: up1
         env:
           URL: "${{ env.INV_WP_BASE }}/wp-json/wp/v2/media"
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          # -L folgt Redirects, -D schreibt NUR Header, -o NUR Body (kein -i!)
-          curl -sS -L \
+          curl --http1.1 -sS -L --location-trusted \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
             -H "Accept: application/json" \
-            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S).pdf" \
+            -H "Expect:" \
+            -H "Connection: close" \
+            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S).pdf" \
             -F "file=@/tmp/smoke.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h1.txt -o /tmp/b1.json || true
 
           echo "----- Response headers (primary) -----"
           sed -n '1,200p' /tmp/h1.txt || true
-
-          echo "----- Response body (primary, first 800B) -----"
-          head -c 800 /tmp/b1.json || true; echo
+          echo "----- Location (primary) -----"
+          grep -i '^location:' /tmp/h1.txt || true
+          echo "----- Body head (primary) -----"
+          head -c 1200 /tmp/b1.json || true; echo
 
           code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h1.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
 
-      - name: Fallback upload (alt endpoint) if primary != 201
+      - name: Fallback upload (alt endpoint, follow redirects with auth)
         id: up2
         if: steps.up1.outputs.code != '201'
         env:
@@ -66,19 +69,23 @@ jobs:
         run: |
           set -euo pipefail
           echo "Endpoint: $URL"
-          curl -sS -L \
+          curl --http1.1 -sS -L --location-trusted \
             -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
             -H "Accept: application/json" \
-            -H "Content-Disposition: attachment; filename=smoke-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
+            -H "Expect:" \
+            -H "Connection: close" \
+            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
             -F "file=@/tmp/smoke.pdf;type=application/pdf" \
             "$URL" \
             -D /tmp/h2.txt -o /tmp/b2.json || true
 
           echo "----- Response headers (alt) -----"
           sed -n '1,200p' /tmp/h2.txt || true
-
-          echo "----- Response body (alt, first 800B) -----"
-          head -c 800 /tmp/b2.json || true; echo
+          echo "----- Location (alt) -----"
+          grep -i '^location:' /tmp/h2.txt || true
+          echo "----- Body head (alt) -----"
+          head -c 1200 /tmp/b2.json || true; echo
 
           code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h2.txt)
           echo "code=$code" >> $GITHUB_OUTPUT
@@ -101,10 +108,135 @@ jobs:
               print("JSON parse error:", e)
               print("RAW(head):", raw[:400])
               sys.exit(1)
-
           if isinstance(data, list) and data:
               data = data[0]
+          src = data.get("source_url") or (data.get("guid") or {}).get("rendered")
+          mid = data.get("id")
+          print("ATTACHMENT_ID:", mid)
+          print("SOURCE_URL:", src)
+          if not src or not str(src).lower().endswith(".pdf"):
+              print("ERROR: No valid PDF source_url in response.")
+              sys.exit(2)
+          PY
+          echo "OK."
 
+      - name: Fail if neither endpoint returned 201
+        if: steps.up1.outputs.code != '201' && steps.up2.outputs.code != '201'
+        run: |
+          echo "Both endpoints failed to return 201 Created. Check headers/body above." >&2
+          exit 1
+name: WP Upload Smoketest
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      INV_WP_BASE:   ${{ secrets.INV_WP_BASE }}
+      INV_WP_USER:   ${{ secrets.INV_WP_USER }}
+      INV_WP_APP_PW: ${{ secrets.INV_WP_APP_PW }}
+
+    steps:
+      - name: Show runner IPs (info)
+        run: |
+          echo "Runner public IPs:"
+          curl -s https://api.ipify.org ; echo
+          curl -s https://ifconfig.me ; echo
+
+      - name: Make tiny PDF on runner
+        run: |
+          cat > /tmp/smoke.pdf <<'PDF'
+          %PDF-1.4
+          1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+          2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+          3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj
+          trailer << /Root 1 0 R >>
+          %%EOF
+          PDF
+          ls -l /tmp/smoke.pdf
+
+      - name: Try upload (primary endpoint, follow redirects with auth)
+        id: up1
+        env:
+          URL: "${{ env.INV_WP_BASE }}/wp-json/wp/v2/media"
+        run: |
+          set -euo pipefail
+          echo "Endpoint: $URL"
+          curl --http1.1 -sS -L --location-trusted \
+            -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
+            -H "Accept: application/json" \
+            -H "Expect:" \
+            -H "Connection: close" \
+            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S).pdf" \
+            -F "file=@/tmp/smoke.pdf;type=application/pdf" \
+            "$URL" \
+            -D /tmp/h1.txt -o /tmp/b1.json || true
+
+          echo "----- Response headers (primary) -----"
+          sed -n '1,200p' /tmp/h1.txt || true
+          echo "----- Location (primary) -----"
+          grep -i '^location:' /tmp/h1.txt || true
+          echo "----- Body head (primary) -----"
+          head -c 1200 /tmp/b1.json || true; echo
+
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h1.txt)
+          echo "code=$code" >> $GITHUB_OUTPUT
+
+      - name: Fallback upload (alt endpoint, follow redirects with auth)
+        id: up2
+        if: steps.up1.outputs.code != '201'
+        env:
+          URL: "${{ env.INV_WP_BASE }}/index.php?rest_route=/wp/v2/media"
+        run: |
+          set -euo pipefail
+          echo "Endpoint: $URL"
+          curl --http1.1 -sS -L --location-trusted \
+            -u "${INV_WP_USER}:${INV_WP_APP_PW}" \
+            -H "User-Agent: Investory-GHA/1.0" \
+            -H "Accept: application/json" \
+            -H "Expect:" \
+            -H "Connection: close" \
+            -H "Content-Disposition: attachment; filename=smoketest-$(date +%Y%m%d-%H%M%S)-alt.pdf" \
+            -F "file=@/tmp/smoke.pdf;type=application/pdf" \
+            "$URL" \
+            -D /tmp/h2.txt -o /tmp/b2.json || true
+
+          echo "----- Response headers (alt) -----"
+          sed -n '1,200p' /tmp/h2.txt || true
+          echo "----- Location (alt) -----"
+          grep -i '^location:' /tmp/h2.txt || true
+          echo "----- Body head (alt) -----"
+          head -c 1200 /tmp/b2.json || true; echo
+
+          code=$(awk 'toupper($1)~/^HTTP\//{c=$2} END{print c+0}' /tmp/h2.txt)
+          echo "code=$code" >> $GITHUB_OUTPUT
+
+      - name: Parse JSON and show source_url
+        run: |
+          set -euo pipefail
+          body="/tmp/b1.json"
+          if [ "${{ steps.up1.outputs.code }}" != "201" ]; then
+            body="/tmp/b2.json"
+          fi
+          echo "Parsing body file: $body"
+          python - "$body" <<'PY'
+          import json,sys
+          p = sys.argv[1]
+          raw = open(p,'rb').read()
+          try:
+              data = json.loads(raw.decode('utf-8','replace'))
+          except Exception as e:
+              print("JSON parse error:", e)
+              print("RAW(head):", raw[:400])
+              sys.exit(1)
+          if isinstance(data, list) and data:
+              data = data[0]
           src = data.get("source_url") or (data.get("guid") or {}).get("rendered")
           mid = data.get("id")
           print("ATTACHMENT_ID:", mid)
