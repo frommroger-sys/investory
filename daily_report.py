@@ -22,11 +22,13 @@ POPPINS_BOLD_URL= os.environ.get("INV_POPPINS_BOLD_URL")
 
 OAI_KEY         = os.environ.get("INV_OAI_API_KEY")  # OpenAI API Key
 
-def debug(msg):  # kompakte Debug-Ausgabe
+def debug(msg: str):
     print(f"[INVESTORY] {msg}")
 
 # ---------------------- Helpers ----------------------
 def fetch_bytes(url: str) -> bytes:
+    if not url:
+        raise ValueError("Asset-URL ist leer.")
     debug(f"GET asset: {url}")
     r = requests.get(url, headers=UA, timeout=60)
     debug(f" -> {r.status_code}, {len(r.content)} bytes")
@@ -132,7 +134,7 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     bullet = ParagraphStyle("Bullet", parent=styles["Normal"], leftIndent=10, bulletIndent=0, spaceAfter=3)
 
     def p_bullet(txt: str): return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
-    def p_link(txt: str, url: str): 
+    def p_link(txt: str, url: str):
         return Paragraph(f"<bullet>&#8226;</bullet>{txt} "
                          f"<font color='#0b5bd3'><u><link href='{url}'>Quelle</link></u></font>", bullet)
 
@@ -193,4 +195,61 @@ def wp_upload_media(file_path: str, title: str = None) -> str:
 
     url = f"{WP_BASE}/wp-json/wp/v2/media"
     fname = os.path.basename(file_path)
-    headers = {"User-Agent": "Investory-Report-Uploader/1.
+    headers = {"User-Agent": "Investory-Report-Uploader/1.0"}
+    data = {}
+    if title:
+        data["title"] = title
+
+    debug(f"Upload → {url} as {fname}")
+    with open(file_path, "rb") as f:
+        files = {"file": (fname, f, "application/pdf")}
+        r = requests.post(
+            url,
+            headers=headers,
+            files=files,   # Multipart!
+            data=data,
+            auth=(WP_USER, WP_APP_PASSWORD),
+            timeout=60,
+        )
+
+    debug(f"Upload status: {r.status_code}")
+    if r.status_code not in (200, 201):
+        snippet = (r.text or "")[:400]
+        debug(f"Upload body (snippet): {snippet}")
+
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise RuntimeError(f"WP upload failed {r.status_code}: {(r.text or '')[:400]}") from e
+
+    try:
+        resp = r.json()
+    except ValueError:
+        raise RuntimeError(f"WP returned non-JSON response: {r.status_code}")
+
+    if isinstance(resp, list) and resp:
+        resp = resp[0]
+
+    source_url = resp.get("source_url") or (resp.get("guid") or {}).get("rendered")
+    if not source_url:
+        raise RuntimeError(f"No source_url in WP response: {resp}")
+    debug(f"source_url: {source_url}")
+    return source_url
+
+# ---------------------- Pipeline ---------------------
+def run_pdf_pipeline():
+    # 1) Inhalte holen
+    report_data = gen_report_data_via_openai()
+
+    # 2) Assets laden & PDF bauen
+    logo_bytes = fetch_bytes(LOGO_URL)
+    out_path = f"/tmp/Daily_Investment_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    build_pdf(out_path, logo_bytes, report_data)
+
+    # 3) Upload
+    public_url = wp_upload_media(out_path, title=os.path.basename(out_path))
+    print("PUBLIC_PDF_URL:", public_url)
+    return public_url
+
+if __name__ == "__main__":
+    run_pdf_pipeline()
