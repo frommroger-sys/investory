@@ -3,7 +3,7 @@ name: Investory Daily Report → GitHub Pages
 on:
   workflow_dispatch: {}
   schedule:
-    # 06:00 Europe/Zurich (Sommer → 04 UTC, Winter → 05 UTC)
+    # 06:00 Europe/Zurich  (Sommer = 04 UTC, Winter = 05 UTC)
     - cron: "0 4 * * 1-5"
     - cron: "0 5 * * 1-5"
 
@@ -44,15 +44,25 @@ jobs:
           python daily_report.py
 
       # ───────────────────────────────────────────────────────────────
-      # 2) in public/ kopieren  (dated + latest)
+      # 2) PDF in pages-Ordner kopieren  (dated + latest)
       # ───────────────────────────────────────────────────────────────
       - name: Copy PDF into pages folder
         run: |
+          set -e
           mkdir -p public/reports
-          # Quellpfad aus /tmp suchen
-          FILE=$(ls /tmp/Daily_Investment_Report_*.pdf | head -n1)
+
+          # Jüngstes Report-PDF in /tmp ermitteln
+          FILE=$(find /tmp -maxdepth 1 -type f -name 'Daily_Investment_Report_*.pdf' \
+                  -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+
+          if [ -z "$FILE" ]; then
+            echo "::error title=PDF not found::Kein Report-PDF in /tmp erzeugt."
+            ls -la /tmp
+            exit 1
+          fi
+
+          echo "Gefundenes PDF: $FILE"
           cp "$FILE" public/reports/
-          # Zusätzlich als „latest“ bereitstellen
           cp "$FILE" public/Daily_Investment_Report_latest.pdf
 
       # ───────────────────────────────────────────────────────────────
@@ -65,7 +75,7 @@ jobs:
           cd ../../
 
       # ───────────────────────────────────────────────────────────────
-      # 4) Deploy nach gh-pages  (bestehende Dateien beibehalten)
+      # 4) Deploy nach gh-pages
       # ───────────────────────────────────────────────────────────────
       - name: Deploy 🚀
         uses: peaceiris/actions-gh-pages@v4
