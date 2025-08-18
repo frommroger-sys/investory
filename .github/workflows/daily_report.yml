@@ -3,18 +3,14 @@ name: Investory Daily Report → GitHub Pages
 on:
   workflow_dispatch: {}
   schedule:
-    # 06:00 Europe/Zurich (Sommer = 04 UTC, Winter = 05 UTC)
+    # 06:00 Europe/Zurich (Sommer → 04 UTC, Winter → 05 UTC)
     - cron: "0 4 * * 1-5"
     - cron: "0 5 * * 1-5"
 
 permissions:
-  contents: write          # nötig für Push auf gh-pages
-  pages: write
+  contents: write
+  pages:    write
   id-token: write
-
-concurrency:
-  group: daily-investory
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -40,22 +36,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests reportlab pillow pytz
 
+      # ───────────────────────────────────────────────────────────────
+      # 1) PDF erzeugen
+      # ───────────────────────────────────────────────────────────────
       - name: Generate PDF
         run: |
           python daily_report.py
 
+      # ───────────────────────────────────────────────────────────────
+      # 2) in public/ kopieren  (dated + latest)
+      # ───────────────────────────────────────────────────────────────
       - name: Copy PDF into pages folder
         run: |
           mkdir -p public/reports
-          cp /tmp/Daily_Investment_Report_*.pdf public/reports/
+          # Quellpfad aus /tmp suchen
+          FILE=$(ls /tmp/Daily_Investment_Report_*.pdf | head -n1)
+          cp "$FILE" public/reports/
+          # Zusätzlich als „latest“ bereitstellen
+          cp "$FILE" public/Daily_Investment_Report_latest.pdf
 
-      # ---------------------------------------------------------
-      # Deploy to GitHub Pages (branch gh-pages → /public root)
-      # ---------------------------------------------------------
+      # ───────────────────────────────────────────────────────────────
+      # 3) Archiv auf 30 Dateien begrenzen
+      # ───────────────────────────────────────────────────────────────
+      - name: Keep only 30 newest PDFs
+        run: |
+          cd public/reports
+          ls -1t Daily_Investment_Report_*.pdf | tail -n +31 | xargs -r rm -f
+          cd ../../
+
+      # ───────────────────────────────────────────────────────────────
+      # 4) Deploy nach gh-pages  (bestehende Dateien beibehalten)
+      # ───────────────────────────────────────────────────────────────
       - name: Deploy 🚀
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public
           publish_branch: gh-pages
-          keep_files: true          # behält ältere Reports
+          keep_files: true
