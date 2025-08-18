@@ -1,7 +1,7 @@
 name: WP Upload Smoketest
 
 on:
-  workflow_dispatch: {}    # Manuell starten
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -89,21 +89,21 @@ jobs:
           if [ "${{ steps.up1.outputs.code }}" != "201" ]; then
             body="/tmp/b2.json"
           fi
-
-          python - <<'PY'
+          echo "Parsing body file: $body"
+          python - "$body" <<'PY'
           import json,sys
-          p=sys.argv[1]
+          p = sys.argv[1]
           with open(p,'rb') as f:
-              raw=f.read()
+              raw = f.read()
           try:
-              data=json.loads(raw.decode('utf-8','replace'))
+              data = json.loads(raw.decode('utf-8','replace'))
           except Exception as e:
               print("JSON parse error:", e)
               print("RAW:", raw[:400])
               sys.exit(1)
 
           if isinstance(data, list) and data:
-              data=data[0]
+              data = data[0]
 
           src = data.get("source_url") or (data.get("guid") or {}).get("rendered")
           mid = data.get("id")
