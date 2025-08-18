@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -36,30 +36,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests reportlab pillow pytz
 
-      # 1) PDF erzeugen
+      # ─────────────────────────────────────────────────────────────
+      # 1) PDF erzeugen  ➟ Ausgabezeile "LOCAL_PDF_PATH: …" wird
+      #    in einen Output-Parameter geschrieben
+      # ─────────────────────────────────────────────────────────────
       - name: Generate PDF
-        run: python daily_report.py
+        id: gen
+        run: |
+          set -e
+          python daily_report.py | tee /tmp/report_log.txt
+          PDF_PATH=$(grep -oE '/tmp/Daily_Investment_Report_[0-9\-]+\.pdf' \
+                     /tmp/report_log.txt | head -n1)
+          if [ -z "$PDF_PATH" ]; then
+            echo "::error ::daily_report.py lieferte keinen Pfad."
+            exit 1
+          fi
+          echo "pdf=$PDF_PATH" >> "$GITHUB_OUTPUT"
+          echo "Gefundener Report: $PDF_PATH"
 
-      # 2) Jüngstes PDF suchen und in public/ kopieren
+      # ─────────────────────────────────────────────────────────────
+      # 2) PDF in public/ kopieren  (dated + latest)
+      # ─────────────────────────────────────────────────────────────
       - name: Copy PDF into pages folder
         run: |
           set -e
           mkdir -p public/reports
-          FILE=$(find /tmp -maxdepth 1 -type f -name 'Daily_Investment_Report_*.pdf' \
-                 -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
-          if [ -z "$FILE" ]; then
-            echo "::error ::Kein Report-PDF gefunden"; exit 1
-          fi
-          cp "$FILE"  public/reports/
-          cp "$FILE"  public/Daily_Investment_Report_latest.pdf
+          cp "${{ steps.gen.outputs.pdf }}" public/reports/
+          cp "${{ steps.gen.outputs.pdf }}" public/Daily_Investment_Report_latest.pdf
 
-      # 3) Archiv auf 30 Dateien kürzen
+      # ─────────────────────────────────────────────────────────────
+      # 3) Archiv auf 30 Dateien begrenzen
+      # ─────────────────────────────────────────────────────────────
       - name: Keep only 30 newest PDFs
         run: |
           cd public/reports
           ls -1t Daily_Investment_Report_*.pdf | tail -n +31 | xargs -r rm -f
 
+      # ─────────────────────────────────────────────────────────────
       # 4) Deployment nach gh-pages
+      # ─────────────────────────────────────────────────────────────
       - name: Deploy 🚀
         uses: peaceiris/actions-gh-pages@v4
         with:
