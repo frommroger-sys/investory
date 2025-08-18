@@ -1,34 +1,19 @@
-name: Investory Daily Report
+name: Investory Daily Report (no-upload)
 
-# Manuell startbar UND nach Zeitplan in Europe/Zurich (Sommer + Winter)
 on:
   workflow_dispatch: {}
-  schedule:
-    # 06:00 Europe/Zurich   → 04:00 UTC (Sommer – CEST)
-    - cron: "0 4 * * 1-5"
-    # 06:00 Europe/Zurich   → 05:00 UTC (Winter – CET)
-    - cron: "0 5 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     env:
-      INV_WP_BASE:           https://www.investory.ch
-      INV_WP_USER:           ${{ secrets.INV_WP_USER }}
-      INV_WP_APP_PW:         ${{ secrets.INV_WP_APP_PW }}
       INV_LOGO_URL:          ${{ secrets.INV_LOGO_URL }}
       INV_POPPINS_REG_URL:   ${{ secrets.INV_POPPINS_REG_URL }}
       INV_POPPINS_BOLD_URL:  ${{ secrets.INV_POPPINS_BOLD_URL }}
       INV_OAI_API_KEY:       ${{ secrets.INV_OAI_API_KEY }}
 
     steps:
-      # Lokalzeit für Logs & datetime.now()
-      - name: Set runner timezone
-        uses: szenius/set-timezone@v2.0     # :contentReference[oaicite:0]{index=0}
-        with:
-          timezoneLinux: "Europe/Zurich"
-
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -42,14 +27,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests reportlab pillow pytz
 
-      - name: Generate & upload PDF
+      - name: Generate PDF (local-only)
         run: |
           python daily_report.py
 
-      # PDF als Artefakt für manuelle Prüfung anhängen
       - name: Upload PDF artifact
         uses: actions/upload-artifact@v4
         with:
           name: latest-investory-report
           path: /tmp/Daily_Investment_Report_*.pdf
-          if-no-files-found: warn
+          if-no-files-found: error
