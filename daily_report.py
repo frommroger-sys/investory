@@ -73,6 +73,16 @@ def gen_report_data_via_openai() -> dict:
     from_iso = prev_day.isoformat()   # z. B. 2025-08-18
     to_iso   = today.isoformat()      # bis jetzt
 
+      # ---- Artikel per SerpAPI holen ---------------------------------------
+    news_ctx = []
+    for tk in RELEVANT_TICKERS.split(",")[:20]:   # nur erste 20 Ticker
+        tk = tk.strip()
+        for title, url in search_news_serpapi(tk, from_iso, to_iso, limit=3):
+            news_ctx.append(f"* {tk} | {title} | {url}")
+
+    context_news = "\n".join(news_ctx[:100])      # Prompt nicht zu groß
+
+
     # ── Prompt zusammenbauen ─────────────────────────────────────────────────
     prompt = f"""
 Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
