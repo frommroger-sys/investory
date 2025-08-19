@@ -167,90 +167,121 @@ def flatten_str_list(obj):
     elif obj is not None:
         flat.append(str(obj))
     return flat
-
 def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
-    register_poppins()
-    styles = getSampleStyleSheet()
-    styles["Normal"].fontName = "Poppins" if "Poppins" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
-    styles["Normal"].fontSize = 10.5
-    styles["Normal"].leading  = 14
+    """
+    Erstellt das PDF aus dem von OpenAI gelieferten JSON.
+    Erwartete Struktur seit 19-08-2025:
+      {
+        "headline": [...],
+        "sections": {
+          "moves":   ["[Quelle](URL) : Text", ...],
+          "news":    [...],
+          "analyst": [...],
+          "macro":   [...],
+          "special": [...]
+        }
+      }
+    """
 
-    title_style = ParagraphStyle("TitleRight", parent=styles["Normal"],
-                                 alignment=2, fontName=styles["Normal"].fontName,
-                                 fontSize=14.5, leading=18, textColor=colors.HexColor("#111"))
-    meta_style  = ParagraphStyle("Meta", parent=styles["Normal"],
-                                 alignment=2, fontSize=9.5, textColor=colors.HexColor("#666"))
-    h2   = ParagraphStyle("H2", parent=styles["Normal"],
-                          fontName=styles["Normal"].fontName,
-                          fontSize=12.2, leading=16,
-                          spaceBefore=6, spaceAfter=3,
-                          textColor=colors.HexColor("#0f2a5a"))
-    bullet = ParagraphStyle("Bullet", parent=styles["Normal"],
-                            leftIndent=10, bulletIndent=0, spaceAfter=3)
+    # 1) Fonts laden ---------------------------------------------------------
+    register_poppins()
+    base_font = "Poppins" if "Poppins" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
+    bold_font = base_font + "-Bold" if base_font == "Poppins" else "Helvetica-Bold"
+
+    # 2) Style-Vorlagen -------------------------------------------------------
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontName = base_font
+    styles["Normal"].fontSize = 9.5        # 1 pt kleiner
+    styles["Normal"].leading  = 13
+
+    h2 = ParagraphStyle(
+        "H2", parent=styles["Normal"],
+        fontName=bold_font, fontSize=11, leading=15,     # Überschrift 1 pt kleiner
+        spaceBefore=10, spaceAfter=5,                    # größerer Abstand
+        textColor=colors.HexColor("#0f2a5a")
+    )
+    bullet = ParagraphStyle(
+        "Bullet", parent=styles["Normal"],
+        leftIndent=10, bulletIndent=0, spaceAfter=4
+    )
 
     def p_bullet(txt): return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
-    def p_link(txt, url): return Paragraph(f"<bullet>&#8226;</bullet>{txt} "
-                                           f"<font color='#0b5bd3'><u><link href='{url}'>Quelle</link></u></font>",
-                                           bullet)
 
-    # Header
+    # Markdown-Link ➞ HTML-Link
+    import re
+    md_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)\s*:\s*(.*)")
+    def md_to_para(md: str) -> Paragraph:
+        m = md_re.match(md)
+        if m:
+            label, url, text = m.groups()
+            html = (f"<bullet>&#8226;</bullet>"
+                    f"<link href='{url}' color='#0b5bd3'><u>{label}</u></link> : {text}")
+            return Paragraph(html, bullet)
+        return p_bullet(md)
+
+    # 3) Logo + Header --------------------------------------------------------
     img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
-    scale = (3.2 * cm) / iw
-    logo  = Image(io.BytesIO(logo_bytes), width=iw * scale, height=ih * scale)
-    title = Paragraph("Daily Investment Report", title_style)
-    stamp = Paragraph(f"Stand: {now_local().strftime('%d.%m.%Y, %H:%M')}", meta_style)
+    logo_w = 3.2 * 1.2 * cm       # 20 % größer
+    logo   = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
+
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Normal"],
+        alignment=2, fontName=bold_font, fontSize=14.5, leading=18
+    )
+    meta_style = ParagraphStyle(
+        "Meta", parent=styles["Normal"],
+        alignment=2, fontSize=8.5, textColor=colors.HexColor("#666")
+    )
 
     doc = SimpleDocTemplate(out_path, pagesize=A4,
                             leftMargin=1.7*cm, rightMargin=1.7*cm,
                             topMargin=1.5*cm, bottomMargin=1.6*cm)
+
     story = []
-    hdr   = Table([[logo, title], ["", stamp]],
-                  colWidths=[3.8*cm, 18.0*cm-3.8*cm])
-    hdr.setStyle(TableStyle([
+    header = Table(
+        [[logo, Paragraph("Daily Investment Report", title_style)],
+         ["",   Paragraph(f"Stand: {now_local().strftime('%d.%m.%Y, %H:%M')}", meta_style)]],
+        colWidths=[logo_w+0.6*cm, 18.0*cm-(logo_w+0.6*cm)]
+    )
+    header.setStyle(TableStyle([
         ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,0),"RIGHT"),
-        ("ALIGN",(1,1),(1,1),"RIGHT"),
-        ("LEFTPADDING",(0,0),(-1,-1),0), ("RIGHTPADDING",(0,0),(-1,-1),0),
-        ("TOPPADDING",(0,0),(-1,-1),0), ("BOTTOMPADDING",(0,0),(-1,-1),4),
-    ]))
-    story += [hdr, Spacer(1,6),
+        ("ALIGN",(1,1),(1,1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),0),
+        ("RIGHTPADDING",(0,0),(-1,-1),0)]))
+    story += [header, Spacer(1,6),
               HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
               Spacer(1,8)]
 
-    story += [Paragraph("Was heute zählt", h2)]
-    for s in report.get("headline", [])[:5]:
-        story.append(p_bullet(s))
+    # 4) Schlagzeilen ---------------------------------------------------------
+    story.append(Paragraph("Was heute zählt", h2))
+    for hl in report.get("headline", [])[:5]:
+        story.append(p_bullet(hl))
     story.append(Spacer(1,8))
 
-    def region(title, key):
-        data = report.get("regions", {}).get(key, {})
-        story.append(Paragraph(title, h2))
-        if data.get("tldr"):
-            txt = "; ".join(flatten_str_list(data["tldr"]))[:400]
-            story.append(p_bullet("<b>TL;DR:</b> " + txt))
-        if data.get("moves"):
-            txt = "; ".join(flatten_str_list(data["moves"]))[:400]
-            story.append(p_bullet("<b>Top Moves:</b> " + txt))
-        for item in (data.get("news") or [])[:8]:
-            if isinstance(item,(list,tuple)) and len(item)==2:
-                txt,url=item; story.append(p_link(f"<b>Unternehmensnews:</b> {txt}", url))
-        if data.get("analyst"):
-            txt = "; ".join(flatten_str_list(data["analyst"]))[:400]
-            story.append(p_bullet("<b>Analysten:</b> " + txt))
-        if data.get("macro"):
-            txt = "; ".join(flatten_str_list(data["macro"]))[:400]
-            story.append(p_bullet("<b>Makro/Branche:</b> " + txt))
-        story.append(Spacer(1,6))
+    # 5) Abschnitte -----------------------------------------------------------
+    section_titles = {
+        "moves":   "Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber",
+        "news":    "Unternehmensnachrichten – Zahlen, Gewinnwarnungen, Dividenden, M&A, Management-Wechsel",
+        "analyst": "Analystenstimmen – neue Ratings und Preisziele großer Häuser",
+        "macro":   "Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen",
+        "special": "Sondermeldungen – Sanktionen oder Embargos, falls betroffen"
+    }
 
-    region("1) Schweiz (SIX)", "CH")
-    region("2) Europa",        "EU")
-    region("3) USA",           "US")
-    region("4) Asien",         "AS")
+    for key in ("moves", "news", "analyst", "macro", "special"):
+        items = report.get("sections", {}).get(key, [])
+        if not items:
+            continue                             # Abschnitt ganz auslassen
+        story.append(Paragraph(section_titles[key], h2))
+        for itm in items:
+            story.append(md_to_para(itm))
+        story.append(Spacer(1,8))
 
+    # 6) Footer ---------------------------------------------------------------
     story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
               Spacer(1,4),
-              Paragraph("© INVESTORY – Alle Rechte vorbehalten. Keine Haftung für die Richtigkeit der Daten.",
-                        styles["Normal"])]
+              Paragraph("© INVESTORY – Alle Rechte vorbehalten. "
+                        "Keine Haftung für die Richtigkeit der Daten.", styles["Normal"])]
 
+    # 7) PDF schreiben --------------------------------------------------------
     doc.build(story)
 
 # --------------------------------------------------------------------------- #
