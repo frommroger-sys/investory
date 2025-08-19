@@ -6,7 +6,7 @@ Erzeugt ein PDF unter /tmp/… und gibt den Pfad aus,
 damit der GitHub-Workflow die Datei weiterverarbeiten kann.
 """
 import os, io, json, requests
-from datetime import datetime
+from datetime import datetime, timedelta   # ← timedelta jetzt importiert
 import pytz
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
