@@ -1,4 +1,4 @@
-name: Investory Daily Report → GitHub Pages   # ← 1) Korrigierter Schlüssel
+name: Investory Daily Report → GitHub Pages   # oberste Zeile, keine Einrückung
 
 # ------------------------------------------------------------
 # 1) Workflow-Trigger
@@ -6,7 +6,7 @@ name: Investory Daily Report → GitHub Pages   # ← 1) Korrigierter Schlüssel
 #    • Mo–Fr: 06:00 Europe/Zurich
 # ------------------------------------------------------------
 on:
-  workflow_dispatch:      # ← 2) Einmal genügt
+  workflow_dispatch:        # manueller Button
   schedule:
     # Sommerzeit: 04 UTC → 06 CEST
     - cron: '0 4 * * 1-5'
@@ -21,106 +21,96 @@ permissions:
   pages:    write
   id-token: write
 
+# ------------------------------------------------------------
+# 3) Job-Definition
+# ------------------------------------------------------------
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    # --------------------------------------------------------
-    # 3) Secrets → als Umgebungs­variablen
-    # --------------------------------------------------------
-    env:
+    env:                       # (Secrets → Umgebungs­variablen)
       INV_LOGO_URL:          ${{ secrets.INV_LOGO_URL }}
       INV_POPPINS_REG_URL:   ${{ secrets.INV_POPPINS_REG_URL }}
       INV_POPPINS_BOLD_URL:  ${{ secrets.INV_POPPINS_BOLD_URL }}
       INV_OAI_API_KEY:       ${{ secrets.INV_OAI_API_KEY }}
+      SERPAPI_KEY:           ${{ secrets.SERPAPI_KEY }}
 
     steps:
-    # --------------------------------------------------------
-    # 4) Quellcode holen
-    # --------------------------------------------------------
-    - name: Checkout repo
-      uses: actions/checkout@v4
+      # ------------------------------------------------------
+      # 4) Repo klonen
+      # ------------------------------------------------------
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-# --------------------------------------------------------
-# 5) Python-Runtime & Dependencies
-# --------------------------------------------------------
-- name: Set up Python 3.11
-  uses: actions/setup-python@v5
-  with:
-    python-version: "3.11"
+      # ------------------------------------------------------
+      # 5) Python-Runtime & Dependencies
+      # ------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-- name: Install dependencies
-  run: |
-    python -m pip install --upgrade pip
-    pip install requests reportlab pillow pytz serpapi
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests reportlab pillow pytz serpapi
 
-    # --------------------------------------------------------
-    # 6) PDF erzeugen
-    #    • daily_report.py schreibt Pfad ins Log
-    #    • wir greifen ihn als Step-Output ab
-    # --------------------------------------------------------
-    - name: Generate PDF
-      id: gen
-      run: |
-        python daily_report.py | tee /tmp/report_log.txt
-        PDF=$(grep -oE '/tmp/Daily_Investment_Report_[0-9\-]+\.pdf' /tmp/report_log.txt | head -n1)
-        if [ -z "$PDF" ]; then
-          echo "::error::PDF-Pfad nicht gefunden"; exit 1
-        fi
-        echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
-        echo "Gefundenes PDF: $PDF"
+      # ------------------------------------------------------
+      # 6) PDF erzeugen
+      # ------------------------------------------------------
+      - name: Generate PDF
+        id: gen
+        run: |
+          python daily_report.py | tee /tmp/report_log.txt
+          PDF=$(grep -oE '/tmp/Daily_Investment_Report_[0-9\-]+\.pdf' /tmp/report_log.txt | head -n1)
+          if [ -z "$PDF" ]; then
+            echo "::error::PDF-Pfad nicht gefunden"; exit 1
+          fi
+          echo "pdf=$PDF" >> "$GITHUB_OUTPUT"
+          echo "Gefundenes PDF: $PDF"
 
-    # --------------------------------------------------------
-    # 7) PDF in pages-Ordner kopieren
-    #    • datierte Kopie in /reports/
-    #    • fixe Kopie als …_latest.pdf
-    # --------------------------------------------------------
-    - name: Copy PDF to public/
-      run: |
-        mkdir -p public/reports
-        cp "${{ steps.gen.outputs.pdf }}" public/reports/
-        cp "${{ steps.gen.outputs.pdf }}" public/Daily_Investment_Report_latest.pdf
+      # ------------------------------------------------------
+      # 7) PDF in public-Ordner kopieren
+      # ------------------------------------------------------
+      - name: Copy PDF to public/
+        run: |
+          mkdir -p public/reports
+          cp "${{ steps.gen.outputs.pdf }}" public/reports/
+          cp "${{ steps.gen.outputs.pdf }}" public/Daily_Investment_Report_latest.pdf
 
-    # --------------------------------------------------------
-    # 8) Archiv begrenzen → nur 30 jüngste Dateien behalten
-    # --------------------------------------------------------
-    - name: Keep only 30 newest PDFs
-      run: |
-        cd public/reports
-        ls -1t Daily_Investment_Report_*.pdf | tail -n +31 | xargs -r rm -f
-        cd ../../
+      # ------------------------------------------------------
+      # 8) Archiv begrenzen (30 Dateien)
+      # ------------------------------------------------------
+      - name: Keep only 30 newest PDFs
+        run: |
+          cd public/reports
+          ls -1t Daily_Investment_Report_*.pdf | tail -n +31 | xargs -r rm -f
+          cd ../../
 
-    # --------------------------------------------------------
-    # 9)  >>>  NEUER SCHRITT  <<<
-    #    index.html im Ordner /reports/ erzeugen
-    # --------------------------------------------------------
-    - name: Build reports index.html
-      run: |
-        cd public/reports
+      # ------------------------------------------------------
+      # 9) index.html der Reports bauen
+      # ------------------------------------------------------
+      - name: Build reports index.html
+        run: |
+          cd public/reports
+          {
+            echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Investment Reports – letzte 30 Tage</title>'
+            echo '<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;}h1{font-size:1.5rem;}ul{line-height:1.6;}a{color:#0b5bd3;text-decoration:none;}a:hover{text-decoration:underline;}</style>'
+            echo '</head><body><h1>Investment Reports (letzte 30 Tage)</h1><ul>'
+            for f in $(ls -1t Daily_Investment_Report_*.pdf); do
+              d=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+              echo "  <li><a href=\"$f\">$d</a></li>"
+            done
+            echo '</ul></body></html>'
+          } > index.html
 
-        {
-          echo '<!DOCTYPE html>'
-          echo '<html lang="de"><head><meta charset="utf-8">'
-          echo '<title>Investment Reports – letzte 30 Tage</title>'
-          echo '<style>body{font-family:Arial,Helvetica,sans-serif;margin:2rem;}'
-          echo 'h1{font-size:1.5rem;} ul{line-height:1.6;}'
-          echo 'a{color:#0b5bd3;text-decoration:none;} a:hover{text-decoration:underline;}'
-          echo '</style></head><body>'
-          echo '<h1>Investment Reports (letzte 30 Tage)</h1><ul>'
-          for f in $(ls -1t Daily_Investment_Report_*.pdf); do
-            d=$(echo "$f" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
-            echo "  <li><a href=\"$f\">$d</a></li>"
-          done
-          echo '</ul></body></html>'
-        } > index.html
-
-    # --------------------------------------------------------
-    # 10) Deploy → gh-pages
-    # --------------------------------------------------------
-    - name: Deploy 🚀
-      uses: peaceiris/actions-gh-pages@v4
-      with:
-        github_token:   ${{ secrets.GITHUB_TOKEN }}
-        publish_dir:    ./public
-        publish_branch: gh-pages
-        keep_files:     true
+      # ------------------------------------------------------
+      # 10) Deploy nach gh-pages
+      # ------------------------------------------------------
+      - name: Deploy 🚀
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token:   ${{ secrets.GITHUB_TOKEN }}
+          publish_dir:    ./public
+          publish_branch: gh-pages
+          keep_files:     true
