@@ -73,39 +73,43 @@ def gen_report_data_via_openai() -> dict:
             }
         }
 
-    prompt = f"""
-Du bist ein deutschsprachiger Finanzjournalist. Schreibe den täglichen
-Investment-Report (max. 1 DIN-A4-Seite) für unser Ticker-Universum:
-{RELEVANT_TICKERS}
+prompt = f"""
+Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
 
-**Gliederung & Überschriften (bitte *exakt* verwenden):**
+**Ticker-Universum**  
+Analysiere ausschließlich folgende Aktien: {RELEVANT_TICKERS}
+
+**Berücksichtigter Zeitraum**  
+Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d.%m.%Y')}**  
+(bei Wochenstart: Freitag – Sonntag einbeziehen).
+
+**Gliederung & Überschriften (bitte exakt übernehmen):**
 1. Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber  
-2. Unternehmensnachrichten – Zahlen, Gewinnwarnungen, Dividenden, M&A, Management-Wechsel und alle börsenrelevanten News  
+2. Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.  
 3. Analystenstimmen – neue Ratings und Preisziele großer Häuser  
 4. Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen  
 5. Sondermeldungen – Sanktionen oder Embargos, falls betroffen
 
-**Inhaltliche Regeln**
-• Max. 5 Bullet-Points pro Abschnitt; jeder Punkt höchstens 3 Zeilen.  
-• *Vor* jedem Bullet **Quelle (Hyperlink) + Doppelpunkt**, danach der Text.  
-  Beispiel:  `[WSJ](https://wsj.com) : Umsatzplus bei Nestlé …`  
-• Lasse ganze Abschnitte weg, falls keine Punkte vorhanden sind.  
-• Keine Aufzählungs-Nummern oder -Buchstaben innerhalb der Abschnitte.
+**Regeln für Bullet-Points**
+• max. 5 Punkte pro Abschnitt, jeder ≤ 3 Zeilen  
+• *vor* jedem Punkt die **Original-Quelle als Voll-URL** (kein Homepage-Link)  
+  Format: `[FT](https://www.ft.com/xyz) : Umsatzplus bei Nestlé …`  
+• Abschnitt komplett weglassen, wenn keine Punkte  
+• keine nummerierten Bullets im Text
 
-**Format (reiner JSON-Block!):**
+**Rückgabeformat (reiner JSON-Block!):**
 {{
   "headline": ["2-5 prägnante Schlagzeilen"],
   "sections": {{
     "moves":   ["[Quelle](URL) : …", ...],
-    "news":    ["[Quelle](URL) : …", ...],
-    "analyst": ["[Quelle](URL) : …", ...],
-    "macro":   ["[Quelle](URL) : …", ...],
-    "special": ["[Quelle](URL) : …", ...]
+    "news":    [...],
+    "analyst": [...],
+    "macro":   [...],
+    "special": [...]
   }}
 }}
 
-Gib *ausschließlich* diesen JSON-Block zurück – keine Erklärungen davor oder danach.
-Datum heute: {now_local().strftime('%Y-%m-%d')}
+Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strftime('%Y-%m-%d')}
 """
 
     url = "https://api.openai.com/v1/chat/completions"
