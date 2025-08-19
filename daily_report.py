@@ -17,6 +17,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
+from serpapi import GoogleSearch
 
 # --------------------------------------------------------------------------- #
 # Konstanten & Helfer
@@ -171,6 +172,42 @@ def flatten_str_list(obj):
     elif obj is not None:
         flat.append(str(obj))
     return flat
+
+# --------------------------------------------------------------------------- #
+# SerpAPI-Helper – holt Deep-Links zu aktuellen Artikeln
+# --------------------------------------------------------------------------- #
+def search_news_serpapi(query: str,
+                        from_date: str,
+                        to_date:   str,
+                        limit:     int = 3) -> list[tuple[str, str]]:
+    """
+    Liefert bis zu `limit` Treffer für einen Suchbegriff aus Google News.
+    Rückgabe: Liste von (Titel, URL).
+    """
+    api_key = os.getenv("SERPAPI_KEY")
+    if not api_key:
+        debug("SERPAPI_KEY fehlt – gebe leere Liste zurück.")
+        return []
+
+    params = {
+        "engine":  "google_news",
+        "q":       query,
+        "hl":      "de",
+        "num":     limit,
+        "after":   from_date,     # ISO-Datum, z. B. 2025-08-18
+        "before":  to_date,       # exklusive upper bound
+        "sort_by": "date",
+        "api_key": api_key
+    }
+
+    try:
+        results = GoogleSearch(params).get_dict()
+        return [(a["title"], a["link"])
+                for a in results.get("news_results", [])]
+    except Exception as e:
+        debug(f"SerpAPI-Fehler bei '{query}': {e}")
+        return []
+
 def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     """
     Erstellt das PDF aus dem von OpenAI gelieferten JSON.
