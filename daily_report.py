@@ -223,7 +223,7 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
 
     # 3) Logo + Header --------------------------------------------------------
     img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
-    logo_w = 5.0 cm
+    logo_w = 5.0 * cm
     logo   = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
 
     title_style = ParagraphStyle(
