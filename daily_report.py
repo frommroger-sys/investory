@@ -5,16 +5,12 @@ Investory – Daily Investment Report (Local-only)
 Erzeugt ein PDF unter /tmp/… und gibt den Pfad aus,
 damit der GitHub-Workflow die Datei weiterverarbeiten kann.
 """
-# --------------------------------------------------------------------------- #
-# Standard-Bibliotheken
-# --------------------------------------------------------------------------- #
+
 import os, io, json, re, requests
 from datetime import datetime, timedelta
 import pytz
+from urllib.parse import urlparse
 
-# --------------------------------------------------------------------------- #
-# ReportLab
-# --------------------------------------------------------------------------- #
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm
@@ -25,31 +21,46 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
 
-# --------------------------------------------------------------------------- #
-# SerpAPI
-# --------------------------------------------------------------------------- #
-from serpapi import GoogleSearch
+# SerpAPI: robuster Import (neue/alte Paketstruktur)
+try:
+    from serpapi.google_search import GoogleSearch
+except Exception:
+    from serpapi import GoogleSearch  # Fallback, falls alte Struktur
 
 # --------------------------------------------------------------------------- #
 # Konstanten & Helfer
 # --------------------------------------------------------------------------- #
 TZ = pytz.timezone("Europe/Zurich")
-def now_local() -> datetime:               # aktuelle Zeit in Zürich
-    return datetime.now(TZ)
-
-def debug(msg: str):
-    print(f"[INVESTORY] {msg}")
-
 UA = {"User-Agent": "Investory-Daily-Report/1.0 (+investory.ch)"}
+def now_local(): return datetime.now(TZ)
+def debug(msg):  print(f"[INVESTORY] {msg}")
 
-# Secrets / URLs aus GitHub-Actions
-LOGO_URL         = os.getenv("INV_LOGO_URL")
-POPPINS_REG_URL  = os.getenv("INV_POPPINS_REG_URL")
-POPPINS_BOLD_URL = os.getenv("INV_POPPINS_BOLD_URL")
-OAI_KEY          = os.getenv("INV_OAI_API_KEY")
+LOGO_URL         = os.environ.get("INV_LOGO_URL")
+POPPINS_REG_URL  = os.environ.get("INV_POPPINS_REG_URL")
+POPPINS_BOLD_URL = os.environ.get("INV_POPPINS_BOLD_URL")
+OAI_KEY          = os.environ.get("INV_OAI_API_KEY")
+SERPAPI_KEY      = os.environ.get("SERPAPI_KEY")
+
+# Quellen-Set (Schweizer Quellen bevorzugen)
+CH_DOMAINS = {"fuw.ch", "nzz.ch", "handelszeitung.ch", "agefi.com", "finews.ch", "cash.ch"}
+ALL_SOURCES_QUERIES = [
+    # Schweizer Quellen
+    "site:fuw.ch",
+    "site:nzz.ch",
+    "site:handelszeitung.ch",
+    "site:agefi.com",
+    "site:finews.ch",
+    "site:cash.ch",
+    # Internationale Leitmedien
+    "site:reuters.com",
+    "site:bloomberg.com",
+    "site:ft.com",
+    "site:wsj.com",
+    "site:asia.nikkei.com",
+]
 
 # --------------------------------------------------------------------------- #
-# Vollständige Ticker-Liste (vorerst nicht gekürzt)
+# Vollständige Ticker-Liste (wird aktuell NICHT zur Erkennung genutzt)
 # --------------------------------------------------------------------------- #
 RELEVANT_TICKERS = """
 SIKA.SW, ROG.SW, VETN.SW, SOON.SW, SFZN.SW, UBSG.SW, PM.SW, LISN.SW,
@@ -69,300 +80,444 @@ PYPL, AMD, CMCSA, REGN, DXCM, ODFL, ANSS, MDLZ, GOOGL, GILD, CHTR, IDXX,
 MNST, EA, ROST, CSX
 """.replace("\n", " ").strip()
 
-# =========================================================================== #
-# 1. SERP-API-HELFER
-# =========================================================================== #
-def search_news_serpapi(query: str,
-                        from_date: str,
-                        to_date:   str,
-                        limit:     int = 10) -> list[tuple[str, str]]:
+# --------------------------------------------------------------------------- #
+# SerpAPI – News-Suche & Aufbereitung
+# --------------------------------------------------------------------------- #
+def serpapi_news(query: str, after_iso: str, before_iso: str, num: int = 10) -> list[dict]:
     """
-    Holt bis zu `limit` News-Treffer (Titel, URL) via Google News / SerpAPI.
-    Rückgabe: Liste [(title, url), …] – bei Fehlern leere Liste.
+    Liefert News-Treffer mit Feldern: title, link, source, date (YYYY-MM-DD), hostname.
+    Filtert strikt auf Datum (nur published am Vortag-Fenster).
     """
-    api_key = os.getenv("SERPAPI_KEY")
-    if not api_key:
-        debug("SERPAPI_KEY fehlt – leere Trefferliste")
+    if not SERPAPI_KEY:
+        debug("SERPAPI_KEY fehlt – gebe leere Liste zurück.")
         return []
 
     params = {
         "engine":  "google_news",
         "q":       query,
         "hl":      "de",
-        "num":     limit,
-        "after":   from_date,   # einschl.
-        "before":  to_date,     # exklusiv
+        "num":     max(1, min(num, 20)),
+        "after":   after_iso,   # inkl. after (00:00)
+        "before":  before_iso,  # exklusiv before (00:00 des Folgetags)
         "sort_by": "date",
-        "api_key": api_key
+        "api_key": SERPAPI_KEY,
     }
 
     try:
         res = GoogleSearch(params).get_dict()
-        return [(a["title"], a["link"])
-                for a in res.get("news_results", [])]
+        items = []
+        for a in res.get("news_results", []) or []:
+            title = a.get("title") or ""
+            link  = a.get("link") or ""
+            src   = (a.get("source") or "").strip()
+            # SerpAPI liefert oft "date" oder "date_published"
+            raw_date = (a.get("date") or a.get("date_published") or "").strip()
+
+            # Datum robust normalisieren (YYYY-MM-DD) – wenn nicht belegbar, skip
+            pub_date = normalize_serpapi_date(raw_date)
+            if not pub_date:
+                # manche Treffer ohne Datum – sicherheitshalber verwerfen
+                continue
+
+            # harte Filterung aufs Fenster
+            if not is_date_in_window(pub_date, after_iso, before_iso):
+                continue
+
+            hostname = urlparse(link).hostname or ""
+            hostname = hostname.replace("www.", "")
+            items.append({
+                "title": title.strip(),
+                "link":  link.strip(),
+                "source": src if src else hostname,
+                "date":  pub_date,  # YYYY-MM-DD
+                "hostname": hostname,
+            })
+        return items
     except Exception as e:
-        debug(f"SerpAPI-Fehler bei »{query}«: {e}")
+        debug(f"SerpAPI-Fehler: {e}")
         return []
 
-def fetch_top_news(from_iso: str,
-                   to_iso:   str,
-                   limit_per_query: int = 15) -> list[tuple[str, str]]:
+def normalize_serpapi_date(raw: str) -> str | None:
     """
-    Drei breite Suchanfragen (intl., US, CH) → vereint, Duplikate entfernt.
+    Versucht SerpAPI-Datumsstrings in YYYY-MM-DD zu überführen.
+    Beispiele: 'Aug 18, 2025', '18.08.25', '2 hours ago' → wird mit Vortags-Fenster schon begrenzt,
+    hier nehmen wir relative Angaben als 'unknown' (None).
     """
-    queries = [
-        # 1) Internationale Leitmedien
-        "site:bloomberg.com OR site:ft.com OR site:reuters.com stocks today",
-        # 2) US-Tech & Makro
-        "site:cnbc.com OR site:wsj.com market today",
-        # 3) Schweiz / D-A-CH
-        "site:nzz.ch OR site:fuw.ch OR site:handelszeitung.ch börse heute"
-    ]
+    raw = (raw or "").strip()
+    if not raw:
+        return None
 
-    hits: list[tuple[str, str]] = []
-    for q in queries:
-        hits += search_news_serpapi(q, from_iso, to_iso, limit_per_query)
+    # ISO direkt?
+    m = re.match(r"^\d{4}-\d{2}-\d{2}", raw)
+    if m:
+        return raw[:10]
 
-    # Duplikate (gleiche URL) entfernen
-    seen, unique = set(), []
-    for title, url in hits:
-        if url not in seen:
-            unique.append((title, url))
-            seen.add(url)
+    # DE-Format 18.08.25 oder 18.08.2025
+    m = re.match(r"^(\d{2})\.(\d{2})\.(\d{2,4})$", raw)
+    if m:
+        d, mth, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y
+        return f"{y}-{mth}-{d}"
 
-    return unique[:40]   # hartes Limit für den Prompt
+    # Engl. Monat-Format Aug 18, 2025
+    try:
+        dt = datetime.strptime(raw, "%b %d, %Y")
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
 
-# =========================================================================== #
-# 2. OPENAI-ABFRAGE
-# =========================================================================== #
-def gen_report_data_via_openai() -> dict:
+    # Relativangaben (x hours ago) → unzuverlässig; hier None
+    if "ago" in raw.lower():
+        return None
+
+    return None
+
+def is_date_in_window(pub_date_iso: str, after_iso: str, before_iso: str) -> bool:
+    """True, wenn after_iso <= pub_date < before_iso (alle im Format YYYY-MM-DD)."""
+    try:
+        d  = datetime.strptime(pub_date_iso, "%Y-%m-%d").date()
+        a  = datetime.strptime(after_iso,     "%Y-%m-%d").date()
+        b  = datetime.strptime(before_iso,    "%Y-%m-%d").date()
+        return a <= d < b
+    except Exception:
+        return False
+
+def fetch_top_news_window(after_iso: str, before_iso: str, per_query: int = 10) -> list[dict]:
     """
-    Fragt GPT-4o mini nach einem Markt-Überblick und gibt IMMER
-    ein gültiges Dict im erwarteten Format zurück.
+    Holt Top-News aus 11 Quellen (je Query), filtert, dedupliziert, priorisiert CH-Domains.
+    Rückgabe: Liste Dicts {title, link, source, date, hostname}
+    """
+    all_hits: list[dict] = []
+    for q in ALL_SOURCES_QUERIES:
+        all_hits.extend(serpapi_news(q, after_iso, before_iso, num=per_query))
+
+    if not all_hits:
+        return []
+
+    # Deduping: zuerst nach normalisiertem Titel (lower, ohne Klammerzusätze)
+    def norm_title(t: str) -> str:
+        t = t.lower().strip()
+        t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)  # Klammerinhalte raus
+        t = re.sub(r"\s+", " ", t)
+        return t
+
+    buckets: dict[str, dict] = {}
+    for it in all_hits:
+        key = norm_title(it["title"])
+        # Falls bereits vorhanden, nimm CH-Domain bevorzugt; sonst die – neuere? (Datum gleich)
+        if key not in buckets:
+            buckets[key] = it
+        else:
+            old = buckets[key]
+            old_ch = old["hostname"].replace("www.", "") in CH_DOMAINS
+            new_ch = it["hostname"].replace("www.", "") in CH_DOMAINS
+            if new_ch and not old_ch:
+                buckets[key] = it  # Schweiz gewinnt
+            # sonst: lassen wir den ersten stehen
+
+    deduped = list(buckets.values())
+
+    # Sortierung: CH-Quellen zuerst, danach alphabetisch nach Source + Titel
+    def sort_key(it):
+        is_ch = it["hostname"] in CH_DOMAINS
+        return (0 if is_ch else 1, it["source"].lower(), it["title"].lower())
+
+    deduped.sort(key=sort_key)
+    return deduped
+
+# --------------------------------------------------------------------------- #
+# OpenAI – Artikel zusammenfassen (Titel/Quelle/Datum/URL → 2–4 Sätze + Firmen)
+# --------------------------------------------------------------------------- #
+def summarize_articles_openai(items: list[dict]) -> dict:
+    """
+    Input: items = [{title, link, source, date, hostname}, ...]
+    Output:
+    {
+      "articles": [
+        {
+          "title": "...",                     # (wie Input)
+          "source": "...",                    # (wie Input)
+          "url": "...",                       # (wie Input)
+          "date": "YYYY-MM-DD",               # (wie Input)
+          "summary": "2–4 Sätze …",
+          "companies": ["Novartis","Sonova"]  # aus Text, so geschrieben wie im Artikel
+        }, ...
+      ]
+    }
     """
     if not OAI_KEY:
-        debug("OpenAI-Key fehlt – Fallback-Inhalt")
-        return {"headline": ["(Kein OpenAI-Key)"],
-                "sections": {k: [] for k in ("moves","news","analyst","macro","special")}}
+        debug("OpenAI key missing – gebe Fallback-Struktur zurück.")
+        return {"articles": [
+            {"title": it["title"], "source": it["source"], "url": it["link"],
+             "date": it["date"], "summary": "(Kein OpenAI-Key) – Rohlink.",
+             "companies": []}
+            for it in items[:10]
+        ]}
 
-    # -------- Zeitraum: Vortag (Mo = Freitag) -------------------------------
-    today    = now_local().date()
-    prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)
-    from_iso = prev_day.isoformat()
-    to_iso   = today.isoformat()
+    # Kompakter, aber eindeutiger Prompt
+    catalog = "\n".join(
+        f"- {it['title']} | {it['source']} | {it['date']} | {it['link']}"
+        for it in items[:20]  # Safety-Limit fürs Token-Budget
+    )
 
-    # -------- Top-News per SerpAPI ------------------------------------------
-    top_news = fetch_top_news(from_iso, to_iso)
-    context_news = "\n".join(f"* {title} | {url}" for title, url in top_news)
-
-    # -------- Prompt --------------------------------------------------------
     prompt = f"""
-Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
+Lies die folgenden Artikel (Titel | Quelle | Datum | URL) und gib für jeden eine prägnante,
+journalistische Zusammenfassung mit **2–4 Sätzen** zurück. 
+Am Ende der Zusammenfassung in Klammern die **Namen der im Artikel genannten Unternehmen**
+(genau so geschrieben wie im Artikel, keine Tickersymbole). Wenn keine eindeutig, dann leer lassen.
 
-**Ticker-Universum**  
-Analysiere ausschließlich folgende Aktien: {RELEVANT_TICKERS}
-
-**Originalartikel (Titel | URL)**  
-{context_news}
-
-**Berücksichtigter Zeitraum**  
-Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d.%m.%Y')}**  
-(bei Wochenstart: Freitag – Sonntag einbeziehen).
-
-**Gliederung (bitte exakt nutzen):**
-1. Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber  
-2. Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.  
-3. Analystenstimmen – neue Ratings und Preisziele großer Häuser  
-4. Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen  
-5. Sondermeldungen – Sanktionen oder Embargos, falls betroffen
-
-**Regeln für Bullet-Points**
-• max. 10 Punkte je Abschnitt, jeder ≤ 3 Zeilen  
-• vor jedem Punkt die **Deep-Link-URL** der Quelle (`https://…/article/...`)  
-• Abschnitte ohne Punkte komplett weglassen  
-• keine nummerierten Bullets im Text
-
-**Rückgabeformat (reiner JSON-Block!):**
+Gib das Ergebnis als **reinen JSON-Block** im Format:
 {{
-  "headline": ["2-5 prägnante Schlagzeilen"],
-  "sections": {{
-    "moves":   ["[Quelle](URL) : …", …],
-    "news":    […],
-    "analyst": […],
-    "macro":   […],
-    "special": […]
-  }}
+  "articles": [
+    {{
+      "title": "...", "source": "...", "url": "...", "date": "YYYY-MM-DD",
+      "summary": "…", "companies": ["…","…"]
+    }}, ...
+  ]
 }}
 
-Gib **ausschließlich** diesen JSON-Block zurück.  Datum: {today}
+Artikel:
+{catalog}
 """
 
-    # -------- OpenAI-Request -----------------------------------------------
     url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OAI_KEY}",
-               "Content-Type":  "application/json"}
+    headers = {"Authorization": f"Bearer {OAI_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "gpt-4o-mini",
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": "Du bist ein präziser Finanzredakteur."},
-            {"role": "user",   "content": prompt}
+            {"role": "user",   "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 1600
+        "temperature": 0.2,
+        "max_tokens": 1500,
     }
 
     try:
         r = requests.post(url, headers=headers, json=body, timeout=60)
         r.raise_for_status()
-        data = json.loads(r.json()["choices"][0]["message"]["content"])
+        raw = r.json()
+        data = json.loads(raw["choices"][0]["message"]["content"])
+        # Grundvalidierung
+        arts = data.get("articles", [])
+        if not isinstance(arts, list):
+            arts = []
+        # Fülle fehlende Felder aus Originalen
+        by_url = {it["link"]: it for it in items}
+        normalized = []
+        for a in arts:
+            src = a.get("source") or ""
+            url_ = a.get("url") or a.get("link") or ""
+            it0 = by_url.get(url_, {})
+            normalized.append({
+                "title":   a.get("title")   or it0.get("title", ""),
+                "source":  src or it0.get("source", ""),
+                "url":     url_ or it0.get("link", ""),
+                "date":    a.get("date")    or it0.get("date", ""),
+                "summary": a.get("summary") or "",
+                "companies": a.get("companies") if isinstance(a.get("companies"), list) else [],
+            })
+        return {"articles": normalized}
     except Exception as e:
-        debug(f"OpenAI-Fehler: {e}")
-        data = {"headline": ["(OpenAI-Error)"],
-                "sections": {k: [] for k in ("moves","news","analyst","macro","special")}}
+        debug(f"OpenAI-Fehler (fange alles ab): {e}")
+        # Fallback: Rohdaten ohne Summary
+        return {"articles": [
+            {"title": it["title"], "source": it["source"], "url": it["link"],
+             "date": it["date"], "summary": "", "companies": []}
+            for it in items[:10]
+        ]}
 
-    # -------- Minimal-Validierung ------------------------------------------
-    data.setdefault("headline", [])
-    data.setdefault("sections", {})
-    for k in ("moves","news","analyst","macro","special"):
-        data["sections"].setdefault(k, [])
+# --------------------------------------------------------------------------- #
+# Report-Daten zusammenstellen (neue Struktur)
+# --------------------------------------------------------------------------- #
+def gen_report_data() -> dict:
+    """
+    Baut die Daten für das PDF:
+      { "articles": [ {title, source, url, date, summary, companies}, ... ] }
+    Nur Vortag (Mo: Fr–So).
+    """
+    # Zeitraum bestimmen (lokal CH)
+    today = now_local().date()
+    prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)  # Mo→Fr (–3)
+    after_iso  = prev_day.isoformat()
+    before_iso = today.isoformat()
 
-    return data
+    # Top-News ziehen (11 Queries, deduped, CH bevorzugt)
+    items = fetch_top_news_window(after_iso, before_iso, per_query=10)
 
-# =========================================================================== #
-# 3. PDF-ERSTELLUNG
-# =========================================================================== #
+    if not items:
+        debug("Keine Items aus SerpAPI – Rückfall auf leere Artikelliste.")
+        return {"articles": []}
+
+    # OpenAI: 2–4 Sätze Summary + Companies
+    summary_pack = summarize_articles_openai(items)
+
+    # Letzte Sicherheit: Struktur
+    arts = summary_pack.get("articles", [])
+    if not isinstance(arts, list):
+        arts = []
+    # Filter: falls doch mal Altlasten hineinrutschen, erneut striktes Fenster
+    arts = [a for a in arts if is_date_in_window(a.get("date",""), after_iso, before_iso)]
+
+    return {"articles": arts}
+
+# --------------------------------------------------------------------------- #
+# Hilfsfunktionen & PDF-Erstellung
+# --------------------------------------------------------------------------- #
 def fetch_bytes(url: str) -> bytes:
     r = requests.get(url, headers=UA, timeout=60)
     r.raise_for_status()
     return r.content
 
-def register_poppins() -> None:
+def register_poppins() -> bool:
     try:
         open("/tmp/Poppins-Regular.ttf","wb").write(fetch_bytes(POPPINS_REG_URL))
         open("/tmp/Poppins-Bold.ttf","wb").write(fetch_bytes(POPPINS_BOLD_URL))
-        pdfmetrics.registerFont(TTFont("Poppins",      "/tmp/Poppins-Regular.ttf"))
-        pdfmetrics.registerFont(TTFont("Poppins-Bold", "/tmp/Poppins-Bold.ttf"))
+        pdfmetrics.registerFont(TTFont("Poppins","/tmp/Poppins-Regular.ttf"))
+        pdfmetrics.registerFont(TTFont("Poppins-Bold","/tmp/Poppins-Bold.ttf"))
+        return True
     except Exception as e:
-        debug(f"Poppins-Fallback auf Helvetica ({e})")
+        debug(f"Poppins-Fallback → Helvetica ({e})")
+        return False
 
-def build_pdf(out_path: str, logo_bytes: bytes, report: dict) -> None:
+# --------------------------------------------------------------------------- #
+# PDF
+# --------------------------------------------------------------------------- #
+def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     """
-    Baut das PDF.  `report` kommt aus gen_report_data_via_openai().
+    Baut das PDF aus der neuen Struktur:
+      { "articles": [ {title, source, url, date, summary, companies}, ... ] }
     """
-    # ----- Safety-Net -------------------------------------------------------
+
+    # Safety-Net: garantiert gültiges Dict
     if not isinstance(report, dict):
         report = {}
-    report.setdefault("headline", [])
-    report.setdefault("sections", {})
+    articles = report.get("articles", [])
+    if not isinstance(articles, list):
+        articles = []
 
-    # ----- Fonts & Styles ---------------------------------------------------
+    # 1) Fonts ---------------------------------------------------------------
     register_poppins()
     base_font = "Poppins" if "Poppins" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
-    bold_font = "Poppins-Bold" if base_font == "Poppins" else "Helvetica-Bold"
+    bold_font = base_font + "-Bold" if base_font == "Poppins" else "Helvetica-Bold"
 
+    # 2) Styles --------------------------------------------------------------
     styles = getSampleStyleSheet()
     styles["Normal"].fontName = base_font
-    styles["Normal"].fontSize = 9.5
-    styles["Normal"].leading  = 13
+    styles["Normal"].fontSize = 10
+    styles["Normal"].leading  = 14
 
-    h2 = ParagraphStyle("H2", parent=styles["Normal"],
-                        fontName=bold_font, fontSize=11, leading=15,
-                        spaceBefore=10, spaceAfter=5, textColor=colors.HexColor("#0f2a5a"))
-    bullet = ParagraphStyle("Bullet", parent=styles["Normal"],
-                            leftIndent=10, bulletIndent=0, spaceAfter=4)
+    h_title = ParagraphStyle(
+        "H_Title", parent=styles["Normal"],
+        fontName=bold_font, fontSize=13.5, leading=17, spaceBefore=10, spaceAfter=6,
+        textColor=colors.HexColor("#0f2a5a")
+    )
+    meta_line = ParagraphStyle(
+        "Meta", parent=styles["Normal"],
+        fontSize=9, textColor=colors.HexColor("#555"), spaceAfter=4
+    )
+    body = ParagraphStyle(
+        "Body", parent=styles["Normal"],
+        fontSize=10, leading=14, spaceAfter=10
+    )
 
-    def p_bullet(txt: str) -> Paragraph:
-        return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
-
-    md_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)\s*:\s*(.*)")
-
-    def md_to_para(md: str) -> Paragraph:
-        m = md_re.match(md)
-        if m:
-            label, url, text = m.groups()
-            html = (f"<bullet>&#8226;</bullet>"
-                    f"<link href='{url}' color='#0b5bd3'><u>{label}</u></link> : {text}")
-            return Paragraph(html, bullet)
-        return p_bullet(md)
-
-    # ----- Header ----------------------------------------------------------
-    logo_img = ImageReader(io.BytesIO(logo_bytes))
-    iw, ih   = logo_img.getSize()
-    logo_w   = 5.0 * cm                        # fixes Maß
-    logo     = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
-
-    title_style = ParagraphStyle("Title", parent=styles["Normal"],
-                                 alignment=2, fontName=bold_font,
-                                 fontSize=14.5, leading=18)
-    meta_style  = ParagraphStyle("Meta",  parent=styles["Normal"],
-                                 alignment=2, fontSize=8.5, textColor="#666")
+    # 3) Header --------------------------------------------------------------
+    img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
+    logo_w = 5.0 * cm
+    logo   = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
 
     doc = SimpleDocTemplate(out_path, pagesize=A4,
                             leftMargin=1.7*cm, rightMargin=1.7*cm,
                             topMargin=1.5*cm, bottomMargin=1.6*cm)
-    story: list = []
 
-    header_tbl = Table(
+    story = []
+    title_style = ParagraphStyle(
+        "Title", parent=styles["Normal"],
+        alignment=2, fontName=bold_font, fontSize=14.5, leading=18
+    )
+    meta_style = ParagraphStyle(
+        "MetaRTL", parent=styles["Normal"],
+        alignment=2, fontSize=8.5, textColor=colors.HexColor("#666")
+    )
+
+    header = Table(
         [[logo, Paragraph("Daily Investment Report", title_style)],
          ["",   Paragraph(f"Stand: {now_local().strftime('%d.%m.%Y, %H:%M')}", meta_style)]],
         colWidths=[logo_w+0.6*cm, 18.0*cm-(logo_w+0.6*cm)]
     )
-    header_tbl.setStyle(TableStyle([
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("ALIGN",(1,0),(1,0),"RIGHT"),
-        ("ALIGN",(1,1),(1,1),"RIGHT"),
-        ("LEFTPADDING",(0,0),(-1,-1),0),
-        ("RIGHTPADDING",(0,0),(-1,-1),0),
+    header.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,0),"RIGHT"),
+        ("ALIGN",(1,1),(1,1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),0),
+        ("RIGHTPADDING",(0,0),(-1,-1),0)
     ]))
-    story += [header_tbl, Spacer(1,6),
-              HRFlowable(color="#e6e6e6", thickness=0.6),
-              Spacer(1,8)]
+    story += [header, Spacer(1,6),
+              HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
+              Spacer(1,6)]
 
-    # ----- Schlagzeilen ----------------------------------------------------
-    story.append(Paragraph("Was heute zählt", h2))
-    for hl in report.get("headline", [])[:5]:
-        story.append(p_bullet(hl))
-    story.append(Spacer(1,8))
+    # ── Keine „Was heute zählt“-Bullets mehr ────────────────────────────────
 
-    # ----- Abschnitte ------------------------------------------------------
-    section_titles = {
-        "moves":   "Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber",
-        "news":    "Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.",
-        "analyst": "Analystenstimmen – neue Ratings und Preisziele großer Häuser",
-        "macro":   "Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen",
-        "special": "Sondermeldungen – Sanktionen oder Embargos, falls betroffen"
-    }
+    # 4) Artikel-Liste -------------------------------------------------------
+    # Darstellung:
+    #  Titel (gross/fett)
+    #  Quelle (verlinkt), kurzes Datum  → EIN Link (nur an Quelle)
+    #  2–4 Sätze Zusammenfassung … (Unternehmen …)
+    for art in articles:
+        title   = (art.get("title") or "").strip()
+        source  = (art.get("source") or "").strip()
+        url     = (art.get("url") or art.get("link") or "").strip()
+        date    = (art.get("date") or "").strip()
+        summary = (art.get("summary") or "").strip()
+        companies = art.get("companies") if isinstance(art.get("companies"), list) else []
+        comp_suffix = f" ({', '.join(companies)})" if companies else ""
 
-    for key in ("moves","news","analyst","macro","special"):
-        items = report.get("sections", {}).get(key, [])
-        if not items:
-            continue
-        story.append(Paragraph(section_titles[key], h2))
-        for itm in items:
-            story.append(md_to_para(itm))
-        story.append(Spacer(1,8))
+        # Titel
+        story.append(Paragraph(title, h_title))
 
-    # ----- Footer ----------------------------------------------------------
-    story += [HRFlowable(color="#e6e6e6", thickness=0.6),
+        # Meta-Zeile: Quelle verlinkt + Datum (kurz)
+        # Link nur 1x – an der Quelle
+        meta_html = f"<link href='{url}' color='#0b5bd3'><u>{source}</u></link>"
+        if date:
+            # Datum kurz DE
+            try:
+                dt = datetime.strptime(date, "%Y-%m-%d")
+                date_str = dt.strftime("%d.%m.%y")
+            except Exception:
+                date_str = date
+            meta_html += f" — {date_str}"
+        story.append(Paragraph(meta_html, meta_line))
+
+        # Summary + (Unternehmen)
+        story.append(Paragraph(summary + comp_suffix, body))
+
+    if not articles:
+        story.append(Paragraph("Heute keine relevanten Artikel im betrachteten Zeitraum gefunden.", styles["Normal"]))
+
+    # 5) Footer ---------------------------------------------------------------
+    story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
               Spacer(1,4),
-              Paragraph("© INVESTORY – Alle Rechte vorbehalten. "
-                        "Keine Haftung für die Richtigkeit der Daten.",
-                        styles["Normal"])]
+              Paragraph("© INVESTORY – Alle Angaben ohne Gewähr.", styles["Normal"])]
 
-    # ----- PDF schreiben ---------------------------------------------------
+    # 6) PDF schreiben --------------------------------------------------------
     doc.build(story)
 
-# =========================================================================== #
-# 4. PIPELINE-EINTRITTSPUNKT
-# =========================================================================== #
-def run_pdf_pipeline() -> str:
-    report   = gen_report_data_via_openai()
-    out_path = f"/tmp/Daily_Investment_Report_{now_local().strftime('%Y-%m-%d')}.pdf"
-    logo_bin = fetch_bytes(LOGO_URL)
-    build_pdf(out_path, logo_bin, report)
+# --------------------------------------------------------------------------- #
+# Pipeline & CLI
+# --------------------------------------------------------------------------- #
+def run_pdf_pipeline():
+    # Daten erzeugen
+    report = gen_report_data()
+    out_path  = f"/tmp/Daily_Investment_Report_{now_local().strftime('%Y-%m-%d')}.pdf"
 
-    # → Der GitHub-Workflow liest diese Zeile aus dem Log
+    # Logo laden
+    if not LOGO_URL:
+        raise RuntimeError("LOGO_URL fehlt in den Umgebungsvariablen.")
+    logo_data = fetch_bytes(LOGO_URL)
+
+    # PDF bauen
+    build_pdf(out_path, logo_data, report)
+
+    # >>> Diese Zeile braucht der GitHub-Workflow
     print(out_path)
     return out_path
 
