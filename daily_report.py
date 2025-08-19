@@ -147,8 +147,10 @@ Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strfti
 
     # ── OpenAI-Request ───────────────────────────────────────────────────────
     url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OAI_KEY}",
-               "Content-Type":  "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OAI_KEY}",
+        "Content-Type":  "application/json"
+    }
     body = {
         "model": "gpt-4o-mini",
         "response_format": {"type": "json_object"},
@@ -160,24 +162,23 @@ Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strfti
         "max_tokens": 1600
     }
 
-# ── OpenAI-Request ─────────────────────────────────────────────────────
-try:
-    r = requests.post(url, headers=headers, json=body, timeout=60)
-    r.raise_for_status()                       # HTTP-Fehler abfangen
-    raw  = r.json()
-    data = json.loads(raw["choices"][0]["message"]["content"])
-except Exception as e:
-    debug(f"OpenAI-Fehler (fange alles ab): {e}")
-    # Immer ein gültiges Skelett zurückgeben
-    data = {"headline": ["(OpenAI-Error)"],
-            "sections": {k: [] for k in ("moves", "news",
-                                         "analyst", "macro", "special")}}
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=60)
+        r.raise_for_status()
+        raw  = r.json()
+        data = json.loads(raw["choices"][0]["message"]["content"])
+    except Exception as e:
+        debug(f"OpenAI-Fehler (fange alles ab): {e}")
+        # Immer ein gültiges Skelett zurückgeben
+        data = {
+            "headline": ["(OpenAI-Error)"],
+            "sections": {k: [] for k in ("moves", "news", "analyst", "macro", "special")}
+        }
 
-
-    # ── Grund-Validierung ───────────────────────────────────────────────────
+    # ── Grund-Validierung ────────────────────────────────────────────────────
     data.setdefault("headline", [])
     data.setdefault("sections", {})
-    for k in ("moves","news","analyst","macro","special"):
+    for k in ("moves", "news", "analyst", "macro", "special"):
         data["sections"].setdefault(k, [])
 
     return data
