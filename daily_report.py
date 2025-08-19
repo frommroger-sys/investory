@@ -66,7 +66,7 @@ def gen_report_data_via_openai() -> dict:
         return {"headline":["(Fallback) Kein API-Key"],
                 "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
 
-# ── Zeitpunkt definieren: gestern, bei Montag = Freitag (–3 Tage) ─────────
+    # ── Zeitpunkt definieren: gestern, bei Montag = Freitag (–3 Tage) ─────────
     today    = now_local().date()
     prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)
 
@@ -74,7 +74,7 @@ def gen_report_data_via_openai() -> dict:
     to_iso   = today.isoformat()      # bis jetzt
 
 # ---- Artikel per SerpAPI holen ---------------------------------------
-news_ctx = []
+    news_ctx = []
     for tk in RELEVANT_TICKERS.split(",")[:20]:   # nur erste 20 Ticker
         tk = tk.strip()
         for title, url in search_news_serpapi(tk, from_iso, to_iso, limit=3):
@@ -106,7 +106,7 @@ Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d
 
 **Regeln für Bullet-Points**
 • max. 10 Punkte pro Abschnitt, jeder ≤ 3 Zeilen  
-• *vor* jedem Punkt die **Original-Quelle als vollständige Deep-Link-URL**    
+• vor jedem Punkt die **Original-Quelle als vollständige Deep-Link-URL**    
 • Verwende nur Links, die mindestens ein Unterverzeichnis enthalten  
   (`.../content/...`, `.../article/...`, `.../story/...` o. Ä.).  
   Ersetze sie **nicht** durch reine Homepage-Links.  
