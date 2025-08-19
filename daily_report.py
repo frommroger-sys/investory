@@ -82,7 +82,7 @@ def gen_report_data_via_openai() -> dict:
 
     context_news = "\n".join(news_ctx[:100])      # Prompt nicht zu groß
 
-# ── Prompt zusammenbauen ─────────────────────────────────────────────────
+    # ── Prompt zusammenbauen ─────────────────────────────────────────────────
     prompt = f"""
 Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
 
