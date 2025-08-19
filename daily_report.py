@@ -160,15 +160,19 @@ Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strfti
         "max_tokens": 1600
     }
 
+# ── OpenAI-Request ─────────────────────────────────────────────────────
+try:
     r = requests.post(url, headers=headers, json=body, timeout=60)
-    r.raise_for_status()
+    r.raise_for_status()                       # HTTP-Fehler abfangen
+    raw  = r.json()
+    data = json.loads(raw["choices"][0]["message"]["content"])
+except Exception as e:
+    debug(f"OpenAI-Fehler (fange alles ab): {e}")
+    # Immer ein gültiges Skelett zurückgeben
+    data = {"headline": ["(OpenAI-Error)"],
+            "sections": {k: [] for k in ("moves", "news",
+                                         "analyst", "macro", "special")}}
 
-    try:
-        data = json.loads(r.json()["choices"][0]["message"]["content"])
-    except Exception as e:
-        debug(f"OpenAI-Parsing-Fehler: {e}")
-        data = {"headline":["(OpenAI-Fehler)"],
-                "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
 
     # ── Grund-Validierung ───────────────────────────────────────────────────
     data.setdefault("headline", [])
