@@ -90,6 +90,9 @@ Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
 **Ticker-Universum**  
 Analysiere ausschließlich folgende Aktien: {RELEVANT_TICKERS}
 
+**Originalartikel (Ticker | Titel | URL)**  
+{context_news}
+
 **Berücksichtigter Zeitraum**  
 Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d.%m.%Y')}**  
 (bei Wochenstart: Freitag – Sonntag einbeziehen).
