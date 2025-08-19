@@ -74,7 +74,7 @@ def gen_report_data_via_openai() -> dict:
     to_iso   = today.isoformat()      # bis jetzt
 
 # ---- Artikel per SerpAPI holen ---------------------------------------
-    news_ctx = []
+news_ctx = []
     for tk in RELEVANT_TICKERS.split(",")[:20]:   # nur erste 20 Ticker
         tk = tk.strip()
         for title, url in search_news_serpapi(tk, from_iso, to_iso, limit=3):
