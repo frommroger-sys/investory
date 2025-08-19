@@ -53,44 +53,61 @@ MNST, EA, ROST, CSX
 """.replace("\n", " ").strip()
 
 # --------------------------------------------------------------------------- #
-# OpenAI – erweiterter Prompt
+# OpenAI – erweiterter Prompt  (optimiert gem. 19-Aug-2025-Briefing)
 # --------------------------------------------------------------------------- #
 def gen_report_data_via_openai() -> dict:
-    if not OAI_KEY:
-        debug("OpenAI key missing – fallback-Inhalt.")
-        return {"headline": ["(Fallback) Kein API-Key."],
-                "regions": {k: {"tldr": [], "moves": [], "news": [],
-                                "analyst": [], "macro": []}
-                            for k in ("CH", "EU", "US", "AS")}}
+    """
+    Fragt GPT 4-o mini nach einem kompakten Markt-Überblick und liefert
+    garantiert JSON zurück.  Die Struktur passt exakt zu unserem PDF-Builder.
+    """
+    if not OAI_KEY:                         # Fallback falls kein Key hinterlegt
+        debug("OpenAI key missing – fallback content.")
+        return {
+            "headline": ["(Fallback) Kein API-Key vorhanden."],
+            "sections": {
+                "moves":   [],
+                "news":    [],
+                "analyst": [],
+                "macro":   [],
+                "special": []
+            }
+        }
 
     prompt = f"""
-Du bist Finanzjournalist und schreibst den **Täglichen Investment-Report**.
-
-**Ticker-Universum**  
-Analysiere ausschließlich folgende Aktien (commasepariert):  
+Du bist ein deutschsprachiger Finanzjournalist. Schreibe den täglichen
+Investment-Report (max. 1 DIN-A4-Seite) für unser Ticker-Universum:
 {RELEVANT_TICKERS}
 
-**Inhalt pro Report (Deutsch):**
-• **Kursbewegungen & Marktreaktionen** – Tagesbewegung > ±3 %, inkl. Kurstreiber  
-• **Unternehmensnachrichten** – Zahlen, Gewinnwarnungen, Dividenden, M&A, Mgmt-Wechsel  
-• **Analystenstimmen** – neue Ratings/Preisziele großer Häuser  
-• **Makro/Branche** – Relevante Gesetze, Rohstoff- oder Zinsbewegungen  
-• **Sondermeldungen** – Sanktionen/Embargos falls betroffen
+**Gliederung & Überschriften (bitte *exakt* verwenden):**
+1. Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber  
+2. Unternehmensnachrichten – Zahlen, Gewinnwarnungen, Dividenden, M&A, Management-Wechsel und alle börsenrelevanten News  
+3. Analystenstimmen – neue Ratings und Preisziele großer Häuser  
+4. Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen  
+5. Sondermeldungen – Sanktionen oder Embargos, falls betroffen
 
-**Rückgabeformat (JSON!):**
+**Inhaltliche Regeln**
+• Max. 5 Bullet-Points pro Abschnitt; jeder Punkt höchstens 3 Zeilen.  
+• *Vor* jedem Bullet **Quelle (Hyperlink) + Doppelpunkt**, danach der Text.  
+  Beispiel:  `[WSJ](https://wsj.com) : Umsatzplus bei Nestlé …`  
+• Lasse ganze Abschnitte weg, falls keine Punkte vorhanden sind.  
+• Keine Aufzählungs-Nummern oder -Buchstaben innerhalb der Abschnitte.
+
+**Format (reiner JSON-Block!):**
 {{
-  "headline": ["2-5 Schlagzeilen"],
-  "regions": {{
-    "CH": {{"tldr":[],"moves":[],"news":[["Kurztext","https://…"]],"analyst":[],"macro":[]}},
-    "EU": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
-    "US": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}},
-    "AS": {{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]}}
+  "headline": ["2-5 prägnante Schlagzeilen"],
+  "sections": {{
+    "moves":   ["[Quelle](URL) : …", ...],
+    "news":    ["[Quelle](URL) : …", ...],
+    "analyst": ["[Quelle](URL) : …", ...],
+    "macro":   ["[Quelle](URL) : …", ...],
+    "special": ["[Quelle](URL) : …", ...]
   }}
 }}
 
-Regeln: Gib **nur JSON** zurück. Keine Halluzinationen.  
-Datum: {now_local().strftime('%Y-%m-%d')}
+Gib *ausschließlich* diesen JSON-Block zurück – keine Erklärungen davor oder danach.
+Datum heute: {now_local().strftime('%Y-%m-%d')}
 """
+
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {OAI_KEY}", "Content-Type": "application/json"}
     body = {
@@ -101,15 +118,26 @@ Datum: {now_local().strftime('%Y-%m-%d')}
             {"role": "user",   "content": prompt}
         ],
         "temperature": 0.3,
-        "max_tokens": 1400
+        "max_tokens": 1600
     }
+
     r = requests.post(url, headers=headers, json=body, timeout=60)
     r.raise_for_status()
+
     try:
-        return json.loads(r.json()["choices"][0]["message"]["content"])
+        data = json.loads(r.json()["choices"][0]["message"]["content"])
     except Exception as e:
-        debug(f"OpenAI-Fehler: {e}")
-        return {"headline":["(OpenAI-Fehler)"],"regions":{k:{"tldr":[],"moves":[],"news":[],"analyst":[],"macro":[]} for k in ("CH","EU","US","AS")}}
+        debug(f"OpenAI-Parsing-Fehler: {e}")
+        data = {"headline":["(OpenAI-Fehler)"],"sections":{k:[] for k in
+                 ("moves","news","analyst","macro","special")}}
+
+    # Grund-Validierung: leere Keys auffüllen
+    data.setdefault("headline", [])
+    data.setdefault("sections", {})
+    for k in ("moves","news","analyst","macro","special"):
+        data["sections"].setdefault(k, [])
+
+    return data
 
 # --------------------------------------------------------------------------- #
 # Hilfsfunktionen & PDF-Erstellung
