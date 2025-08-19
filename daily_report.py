@@ -225,7 +225,7 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
 
     # 3) Logo + Header --------------------------------------------------------
     img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
-    logo_w = 3.2 * 1.2 * cm       # 20 % größer
+    logo_w = 5.0 cm
     logo   = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
 
     title_style = ParagraphStyle(
@@ -264,7 +264,7 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     # 5) Abschnitte -----------------------------------------------------------
     section_titles = {
         "moves":   "Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber",
-        "news":    "Unternehmensnachrichten – Zahlen, Gewinnwarnungen, Dividenden, M&A, Management-Wechsel",
+        "news":    "Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.",
         "analyst": "Analystenstimmen – neue Ratings und Preisziele großer Häuser",
         "macro":   "Makro / Branche – Relevante Gesetze, Rohstoff- oder Zinsbewegungen",
         "special": "Sondermeldungen – Sanktionen oder Embargos, falls betroffen"
