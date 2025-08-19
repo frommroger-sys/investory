@@ -72,8 +72,8 @@ def gen_report_data_via_openai() -> dict:
 
     from_iso = prev_day.isoformat()   # z. B. 2025-08-18
     to_iso   = today.isoformat()      # bis jetzt
-
-# ---- Artikel per SerpAPI holen ---------------------------------------
+  
+    # ---- Artikel per SerpAPI holen ---------------------------------------
     news_ctx = []
     for tk in RELEVANT_TICKERS.split(",")[:20]:   # nur erste 20 Ticker
         tk = tk.strip()
@@ -81,7 +81,6 @@ def gen_report_data_via_openai() -> dict:
             news_ctx.append(f"* {tk} | {title} | {url}")
 
     context_news = "\n".join(news_ctx[:100])      # Prompt nicht zu groß
-
 
 # ── Prompt zusammenbauen ─────────────────────────────────────────────────
     prompt = f"""
