@@ -53,27 +53,23 @@ MNST, EA, ROST, CSX
 """.replace("\n", " ").strip()
 
 # --------------------------------------------------------------------------- #
-# OpenAI – erweiterter Prompt  (optimiert gem. 19-Aug-2025-Briefing)
+# OpenAI – erweiterter Prompt  (Stand 21-Aug-2025)
 # --------------------------------------------------------------------------- #
 def gen_report_data_via_openai() -> dict:
     """
-    Fragt GPT 4-o mini nach einem kompakten Markt-Überblick und liefert
-    garantiert JSON zurück.  Die Struktur passt exakt zu unserem PDF-Builder.
+    Liefert einen JSON-Marktüberblick für den Vortag
+    (bei Montag: Freitag–Sonntag). Passt zur Struktur des PDF-Builders.
     """
-    if not OAI_KEY:                         # Fallback falls kein Key hinterlegt
+    if not OAI_KEY:
         debug("OpenAI key missing – fallback content.")
-        return {
-            "headline": ["(Fallback) Kein API-Key vorhanden."],
-            "sections": {
-                "moves":   [],
-                "news":    [],
-                "analyst": [],
-                "macro":   [],
-                "special": []
-            }
-        }
+        return {"headline":["(Fallback) Kein API-Key"],
+                "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
 
-prompt = f"""
+    # ── Zeitpunkt definieren: gestern, bei Montag = Freitag (–3 Tage) ─────────
+    prev_day = now_local() - timedelta(days=1 if now_local().weekday() != 0 else 3)
+
+    # ── Prompt zusammenbauen ─────────────────────────────────────────────────
+    prompt = f"""
 Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
 
 **Ticker-Universum**  
@@ -92,7 +88,7 @@ Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d
 
 **Regeln für Bullet-Points**
 • max. 5 Punkte pro Abschnitt, jeder ≤ 3 Zeilen  
-• *vor* jedem Punkt die **Original-Quelle als Voll-URL** (kein Homepage-Link)  
+• *vor* jedem Punkt die **Original-Quelle als Voll-URL**  
   Format: `[FT](https://www.ft.com/xyz) : Umsatzplus bei Nestlé …`  
 • Abschnitt komplett weglassen, wenn keine Punkte  
 • keine nummerierten Bullets im Text
@@ -112,8 +108,10 @@ Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d
 Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strftime('%Y-%m-%d')}
 """
 
+    # ── OpenAI-Request ───────────────────────────────────────────────────────
     url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OAI_KEY}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {OAI_KEY}",
+               "Content-Type":  "application/json"}
     body = {
         "model": "gpt-4o-mini",
         "response_format": {"type": "json_object"},
@@ -132,10 +130,10 @@ Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strfti
         data = json.loads(r.json()["choices"][0]["message"]["content"])
     except Exception as e:
         debug(f"OpenAI-Parsing-Fehler: {e}")
-        data = {"headline":["(OpenAI-Fehler)"],"sections":{k:[] for k in
-                 ("moves","news","analyst","macro","special")}}
+        data = {"headline":["(OpenAI-Fehler)"],
+                "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
 
-    # Grund-Validierung: leere Keys auffüllen
+    # ── Grund-Validierung ───────────────────────────────────────────────────
     data.setdefault("headline", [])
     data.setdefault("sections", {})
     for k in ("moves","news","analyst","macro","special"):
