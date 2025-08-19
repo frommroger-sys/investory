@@ -130,6 +130,16 @@ def register_poppins() -> bool:
         debug(f"Poppins-Fallback → Helvetica ({e})")
         return False
 
+def flatten_str_list(obj):
+    """Flacht verschachtelte Listen ab und konvertiert alle Elemente zu str."""
+    flat = []
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            flat.extend(flatten_str_list(item))
+    elif obj is not None:
+        flat.append(str(obj))
+    return flat
+
 def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
     register_poppins()
     styles = getSampleStyleSheet()
@@ -187,17 +197,20 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
         data = report.get("regions", {}).get(key, {})
         story.append(Paragraph(title, h2))
         if data.get("tldr"):
-            story.append(p_bullet("<b>TL;DR:</b> " + "; ".join(data["tldr"])[:400]))
+            txt = "; ".join(flatten_str_list(data["tldr"]))[:400]
+            story.append(p_bullet("<b>TL;DR:</b> " + txt))
         if data.get("moves"):
-            story.append(p_bullet("<b>Top Moves:</b> " + "; ".join(data["moves"])[:400]))
+            txt = "; ".join(flatten_str_list(data["moves"]))[:400]
+            story.append(p_bullet("<b>Top Moves:</b> " + txt))
         for item in (data.get("news") or [])[:8]:
             if isinstance(item,(list,tuple)) and len(item)==2:
-                txt,url=item
-                story.append(p_link(f"<b>Unternehmensnews:</b> {txt}", url))
+                txt,url=item; story.append(p_link(f"<b>Unternehmensnews:</b> {txt}", url))
         if data.get("analyst"):
-            story.append(p_bullet("<b>Analysten:</b> " + "; ".join(data["analyst"])[:400]))
+            txt = "; ".join(flatten_str_list(data["analyst"]))[:400]
+            story.append(p_bullet("<b>Analysten:</b> " + txt))
         if data.get("macro"):
-            story.append(p_bullet("<b>Makro/Branche:</b> " + " ".join(data["macro"])[:400]))
+            txt = "; ".join(flatten_str_list(data["macro"]))[:400]
+            story.append(p_bullet("<b>Makro/Branche:</b> " + txt))
         story.append(Spacer(1,6))
 
     region("1) Schweiz (SIX)", "CH")
