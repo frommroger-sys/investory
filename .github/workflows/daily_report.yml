@@ -1,4 +1,4 @@
-name: Investory Daily Report → GitHub Pages
+name: Investory Daily Report → GitHub Pages   # ← 1) Korrigierter Schlüssel
 
 # ------------------------------------------------------------
 # 1) Workflow-Trigger
@@ -6,13 +6,12 @@ name: Investory Daily Report → GitHub Pages
 #    • Mo–Fr: 06:00 Europe/Zurich
 # ------------------------------------------------------------
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:      # ← 2) Einmal genügt
   schedule:
-    # Sommerzeit: 04 UTC  → 06 CEST
-    - cron: "0 4 * * 1-5"
-    # Winterzeit: 05 UTC  → 06 CET
-    - cron: "0 5 * * 1-5"
-  workflow_dispatch:   #  ←  MANUELLER TRIGGER
+    # Sommerzeit: 04 UTC → 06 CEST
+    - cron: '0 4 * * 1-5'
+    # Winterzeit: 05 UTC → 06 CET
+    - cron: '0 5 * * 1-5'
 
 # ------------------------------------------------------------
 # 2) Repository-Schreibrechte für gh-pages
