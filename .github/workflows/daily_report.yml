@@ -53,7 +53,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests reportlab pillow pytz google-search-results
+          pip install requests reportlab pillow pytz serpapi python-Levenshtein
 
       # ------------------------------------------------------
       # 6) PDF erzeugen
