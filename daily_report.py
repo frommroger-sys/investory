@@ -67,7 +67,11 @@ def gen_report_data_via_openai() -> dict:
                 "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
 
     # ── Zeitpunkt definieren: gestern, bei Montag = Freitag (–3 Tage) ─────────
-    prev_day = now_local() - timedelta(days=1 if now_local().weekday() != 0 else 3)
+    today    = now_local().date()
+    prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)
+
+    from_iso = prev_day.isoformat()   # z. B. 2025-08-18
+    to_iso   = today.isoformat()      # bis jetzt
 
     # ── Prompt zusammenbauen ─────────────────────────────────────────────────
     prompt = f"""
