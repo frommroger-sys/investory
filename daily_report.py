@@ -262,6 +262,16 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
       }
     """
 
+    # ------------------------------------------------------------------
+    # Safety-Net: garantiert gültiges Dict, auch wenn None o. Ä. kommt
+    # ------------------------------------------------------------------
+    if not isinstance(report, dict):
+        report = {}
+    report.setdefault("headline", [])
+    report.setdefault("sections", {})
+
+    # ----- ab hier DEIN bisheriger PDF-Erstell-Code unverändert -------
+    ...
     # 1) Fonts laden ---------------------------------------------------------
     register_poppins()
     base_font = "Poppins" if "Poppins" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
