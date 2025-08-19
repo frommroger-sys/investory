@@ -106,7 +106,7 @@ Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d
 
 **Regeln für Bullet-Points**
 • max. 10 Punkte pro Abschnitt, jeder ≤ 3 Zeilen  
-• *vor* jedem Punkt die **Original-Quelle als **vollständige Deep-Link-URL**    
+• *vor* jedem Punkt die **Original-Quelle als vollständige Deep-Link-URL**    
 • Verwende nur Links, die mindestens ein Unterverzeichnis enthalten  
   (`.../content/...`, `.../article/...`, `.../story/...` o. Ä.).  
   Ersetze sie **nicht** durch reine Homepage-Links.  
