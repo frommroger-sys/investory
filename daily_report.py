@@ -5,9 +5,16 @@ Investory – Daily Investment Report (Local-only)
 Erzeugt ein PDF unter /tmp/… und gibt den Pfad aus,
 damit der GitHub-Workflow die Datei weiterverarbeiten kann.
 """
-import os, io, json, requests
-from datetime import datetime, timedelta   # ← timedelta jetzt importiert
+# --------------------------------------------------------------------------- #
+# Standard-Bibliotheken
+# --------------------------------------------------------------------------- #
+import os, io, json, re, requests
+from datetime import datetime, timedelta
 import pytz
+
+# --------------------------------------------------------------------------- #
+# ReportLab
+# --------------------------------------------------------------------------- #
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm
@@ -17,23 +24,32 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
+
+# --------------------------------------------------------------------------- #
+# SerpAPI
+# --------------------------------------------------------------------------- #
 from serpapi import GoogleSearch
 
 # --------------------------------------------------------------------------- #
 # Konstanten & Helfer
 # --------------------------------------------------------------------------- #
 TZ = pytz.timezone("Europe/Zurich")
-UA = {"User-Agent": "Investory-Daily-Report/1.0 (+investory.ch)"}
-def now_local(): return datetime.now(TZ)
-def debug(msg):  print(f"[INVESTORY] {msg}")
+def now_local() -> datetime:               # aktuelle Zeit in Zürich
+    return datetime.now(TZ)
 
-LOGO_URL        = os.environ.get("INV_LOGO_URL")
-POPPINS_REG_URL = os.environ.get("INV_POPPINS_REG_URL")
-POPPINS_BOLD_URL= os.environ.get("INV_POPPINS_BOLD_URL")
-OAI_KEY         = os.environ.get("INV_OAI_API_KEY")
+def debug(msg: str):
+    print(f"[INVESTORY] {msg}")
+
+UA = {"User-Agent": "Investory-Daily-Report/1.0 (+investory.ch)"}
+
+# Secrets / URLs aus GitHub-Actions
+LOGO_URL         = os.getenv("INV_LOGO_URL")
+POPPINS_REG_URL  = os.getenv("INV_POPPINS_REG_URL")
+POPPINS_BOLD_URL = os.getenv("INV_POPPINS_BOLD_URL")
+OAI_KEY          = os.getenv("INV_OAI_API_KEY")
 
 # --------------------------------------------------------------------------- #
-# Vollständige Ticker-Liste
+# Vollständige Ticker-Liste (vorerst nicht gekürzt)
 # --------------------------------------------------------------------------- #
 RELEVANT_TICKERS = """
 SIKA.SW, ROG.SW, VETN.SW, SOON.SW, SFZN.SW, UBSG.SW, PM.SW, LISN.SW,
@@ -53,68 +69,107 @@ PYPL, AMD, CMCSA, REGN, DXCM, ODFL, ANSS, MDLZ, GOOGL, GILD, CHTR, IDXX,
 MNST, EA, ROST, CSX
 """.replace("\n", " ").strip()
 
-# --------------------------------------------------------------------------- #
-# OpenAI – erweiterter Prompt  (Stand 21-Aug-2025)
-# --------------------------------------------------------------------------- #
-def gen_report_data_via_openai() -> dict:
+# =========================================================================== #
+# 1. SERP-API-HELFER
+# =========================================================================== #
+def search_news_serpapi(query: str,
+                        from_date: str,
+                        to_date:   str,
+                        limit:     int = 10) -> list[tuple[str, str]]:
     """
-    Liefert einen JSON-Marktüberblick für den Vortag
-    (bei Montag: Freitag–Sonntag). Passt zur Struktur des PDF-Builders.
+    Holt bis zu `limit` News-Treffer (Titel, URL) via Google News / SerpAPI.
+    Rückgabe: Liste [(title, url), …] – bei Fehlern leere Liste.
     """
-    if not OAI_KEY:
-        debug("OpenAI key missing – fallback content.")
-        return {"headline":["(Fallback) Kein API-Key"],
-                "sections":{k:[] for k in ("moves","news","analyst","macro","special")}}
+    api_key = os.getenv("SERPAPI_KEY")
+    if not api_key:
+        debug("SERPAPI_KEY fehlt – leere Trefferliste")
+        return []
 
-    # ── Zeitpunkt definieren: gestern, bei Montag = Freitag (–3 Tage) ─────────
-    today    = now_local().date()
-    prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)
+    params = {
+        "engine":  "google_news",
+        "q":       query,
+        "hl":      "de",
+        "num":     limit,
+        "after":   from_date,   # einschl.
+        "before":  to_date,     # exklusiv
+        "sort_by": "date",
+        "api_key": api_key
+    }
 
-    from_iso = prev_day.isoformat()   # z. B. 2025-08-18
-    to_iso   = today.isoformat()      # bis jetzt
-  
-# --------------------------------------------------------------------------- #
-# SerpAPI-Shortcut – holt 3 breite News-Abfragen (≈ 3 Credits)
-# --------------------------------------------------------------------------- #
-def fetch_top_news(from_iso: str, to_iso: str, limit_per_query: int = 15) -> list[tuple[str, str]]:
+    try:
+        res = GoogleSearch(params).get_dict()
+        return [(a["title"], a["link"])
+                for a in res.get("news_results", [])]
+    except Exception as e:
+        debug(f"SerpAPI-Fehler bei »{query}«: {e}")
+        return []
+
+def fetch_top_news(from_iso: str,
+                   to_iso:   str,
+                   limit_per_query: int = 15) -> list[tuple[str, str]]:
     """
-    Liefert eine flache Liste (Titel, URL) mit den wichtigsten Markt-News
-    des Tages aus internationalen *und* Schweizer Quellen.
+    Drei breite Suchanfragen (intl., US, CH) → vereint, Duplikate entfernt.
     """
     queries = [
-        # 1) internationale Leitmedien
+        # 1) Internationale Leitmedien
         "site:bloomberg.com OR site:ft.com OR site:reuters.com stocks today",
-        # 2) US-Tech & Macro
+        # 2) US-Tech & Makro
         "site:cnbc.com OR site:wsj.com market today",
-        # 3) DACH / Schweiz
+        # 3) Schweiz / D-A-CH
         "site:nzz.ch OR site:fuw.ch OR site:handelszeitung.ch börse heute"
     ]
 
-    news: list[tuple[str, str]] = []
+    hits: list[tuple[str, str]] = []
     for q in queries:
-        news += search_news_serpapi(q, from_iso, to_iso, limit_per_query)
-    # Duplikate löschen – gleiche URL nur einmal
-    seen = set(); filtered = []
-    for title, url in news:
-        if url not in seen:
-            filtered.append((title, url)); seen.add(url)
-    return filtered[:40]          # hartes Oberlimit fürs Prompt
+        hits += search_news_serpapi(q, from_iso, to_iso, limit_per_query)
 
-    # ── Prompt zusammenbauen ─────────────────────────────────────────────────
+    # Duplikate (gleiche URL) entfernen
+    seen, unique = set(), []
+    for title, url in hits:
+        if url not in seen:
+            unique.append((title, url))
+            seen.add(url)
+
+    return unique[:40]   # hartes Limit für den Prompt
+
+# =========================================================================== #
+# 2. OPENAI-ABFRAGE
+# =========================================================================== #
+def gen_report_data_via_openai() -> dict:
+    """
+    Fragt GPT-4o mini nach einem Markt-Überblick und gibt IMMER
+    ein gültiges Dict im erwarteten Format zurück.
+    """
+    if not OAI_KEY:
+        debug("OpenAI-Key fehlt – Fallback-Inhalt")
+        return {"headline": ["(Kein OpenAI-Key)"],
+                "sections": {k: [] for k in ("moves","news","analyst","macro","special")}}
+
+    # -------- Zeitraum: Vortag (Mo = Freitag) -------------------------------
+    today    = now_local().date()
+    prev_day = today - timedelta(days=1 if today.weekday() != 0 else 3)
+    from_iso = prev_day.isoformat()
+    to_iso   = today.isoformat()
+
+    # -------- Top-News per SerpAPI ------------------------------------------
+    top_news = fetch_top_news(from_iso, to_iso)
+    context_news = "\n".join(f"* {title} | {url}" for title, url in top_news)
+
+    # -------- Prompt --------------------------------------------------------
     prompt = f"""
 Du bist Finanzjournalist und erstellst den **Täglichen Investment-Report**.
 
 **Ticker-Universum**  
 Analysiere ausschließlich folgende Aktien: {RELEVANT_TICKERS}
 
-**Originalartikel (Ticker | Titel | URL)**  
+**Originalartikel (Titel | URL)**  
 {context_news}
 
 **Berücksichtigter Zeitraum**  
 Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d.%m.%Y')}**  
 (bei Wochenstart: Freitag – Sonntag einbeziehen).
 
-**Gliederung & Überschriften (bitte exakt übernehmen):**
+**Gliederung (bitte exakt nutzen):**
 1. Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber  
 2. Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.  
 3. Analystenstimmen – neue Ratings und Preisziele großer Häuser  
@@ -122,35 +177,30 @@ Alle Kursbewegungen & Nachrichten beziehen sich auf **{prev_day.strftime('%A, %d
 5. Sondermeldungen – Sanktionen oder Embargos, falls betroffen
 
 **Regeln für Bullet-Points**
-• max. 10 Punkte pro Abschnitt, jeder ≤ 3 Zeilen  
-• vor jedem Punkt die **Original-Quelle als vollständige Deep-Link-URL**    
-• Verwende nur Links, die mindestens ein Unterverzeichnis enthalten  
-  (`.../content/...`, `.../article/...`, `.../story/...` o. Ä.).  
-  Ersetze sie **nicht** durch reine Homepage-Links.  
-• Abschnitt komplett weglassen, wenn keine Punkte vorhanden sind  
-• Keine nummerierten Bullets im Text
+• max. 10 Punkte je Abschnitt, jeder ≤ 3 Zeilen  
+• vor jedem Punkt die **Deep-Link-URL** der Quelle (`https://…/article/...`)  
+• Abschnitte ohne Punkte komplett weglassen  
+• keine nummerierten Bullets im Text
 
 **Rückgabeformat (reiner JSON-Block!):**
 {{
   "headline": ["2-5 prägnante Schlagzeilen"],
   "sections": {{
-    "moves":   ["[Quelle](URL) : …", ...],
-    "news":    [...],
-    "analyst": [...],
-    "macro":   [...],
-    "special": [...]
+    "moves":   ["[Quelle](URL) : …", …],
+    "news":    […],
+    "analyst": […],
+    "macro":   […],
+    "special": […]
   }}
 }}
 
-Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strftime('%Y-%m-%d')}
+Gib **ausschließlich** diesen JSON-Block zurück.  Datum: {today}
 """
 
-    # ── OpenAI-Request ───────────────────────────────────────────────────────
+    # -------- OpenAI-Request -----------------------------------------------
     url = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OAI_KEY}",
-        "Content-Type":  "application/json"
-    }
+    headers = {"Authorization": f"Bearer {OAI_KEY}",
+               "Content-Type":  "application/json"}
     body = {
         "model": "gpt-4o-mini",
         "response_format": {"type": "json_object"},
@@ -165,141 +215,68 @@ Gib ausschließlich diesen JSON-Block zurück.  Datum heute: {now_local().strfti
     try:
         r = requests.post(url, headers=headers, json=body, timeout=60)
         r.raise_for_status()
-        raw  = r.json()
-        data = json.loads(raw["choices"][0]["message"]["content"])
+        data = json.loads(r.json()["choices"][0]["message"]["content"])
     except Exception as e:
-        debug(f"OpenAI-Fehler (fange alles ab): {e}")
-        # Immer ein gültiges Skelett zurückgeben
-        data = {
-            "headline": ["(OpenAI-Error)"],
-            "sections": {k: [] for k in ("moves", "news", "analyst", "macro", "special")}
-        }
+        debug(f"OpenAI-Fehler: {e}")
+        data = {"headline": ["(OpenAI-Error)"],
+                "sections": {k: [] for k in ("moves","news","analyst","macro","special")}}
 
-    # ── Grund-Validierung ────────────────────────────────────────────────────
+    # -------- Minimal-Validierung ------------------------------------------
     data.setdefault("headline", [])
     data.setdefault("sections", {})
-    for k in ("moves", "news", "analyst", "macro", "special"):
+    for k in ("moves","news","analyst","macro","special"):
         data["sections"].setdefault(k, [])
 
     return data
 
-# --------------------------------------------------------------------------- #
-# Hilfsfunktionen & PDF-Erstellung
-# --------------------------------------------------------------------------- #
+# =========================================================================== #
+# 3. PDF-ERSTELLUNG
+# =========================================================================== #
 def fetch_bytes(url: str) -> bytes:
     r = requests.get(url, headers=UA, timeout=60)
     r.raise_for_status()
     return r.content
 
-def register_poppins() -> bool:
+def register_poppins() -> None:
     try:
         open("/tmp/Poppins-Regular.ttf","wb").write(fetch_bytes(POPPINS_REG_URL))
         open("/tmp/Poppins-Bold.ttf","wb").write(fetch_bytes(POPPINS_BOLD_URL))
-        pdfmetrics.registerFont(TTFont("Poppins","/tmp/Poppins-Regular.ttf"))
-        pdfmetrics.registerFont(TTFont("Poppins-Bold","/tmp/Poppins-Bold.ttf"))
-        return True
+        pdfmetrics.registerFont(TTFont("Poppins",      "/tmp/Poppins-Regular.ttf"))
+        pdfmetrics.registerFont(TTFont("Poppins-Bold", "/tmp/Poppins-Bold.ttf"))
     except Exception as e:
-        debug(f"Poppins-Fallback → Helvetica ({e})")
-        return False
+        debug(f"Poppins-Fallback auf Helvetica ({e})")
 
-def flatten_str_list(obj):
-    """Flacht verschachtelte Listen ab und konvertiert alle Elemente zu str."""
-    flat = []
-    if isinstance(obj, (list, tuple)):
-        for item in obj:
-            flat.extend(flatten_str_list(item))
-    elif obj is not None:
-        flat.append(str(obj))
-    return flat
-
-# --------------------------------------------------------------------------- #
-# SerpAPI-Helper – holt Deep-Links zu aktuellen Artikeln
-# --------------------------------------------------------------------------- #
-def search_news_serpapi(query: str,
-                        from_date: str,
-                        to_date:   str,
-                        limit:     int = 3) -> list[tuple[str, str]]:
+def build_pdf(out_path: str, logo_bytes: bytes, report: dict) -> None:
     """
-    Liefert bis zu `limit` Treffer für einen Suchbegriff aus Google News.
-    Rückgabe: Liste von (Titel, URL).
+    Baut das PDF.  `report` kommt aus gen_report_data_via_openai().
     """
-    api_key = os.getenv("SERPAPI_KEY")
-    if not api_key:
-        debug("SERPAPI_KEY fehlt – gebe leere Liste zurück.")
-        return []
-
-    params = {
-        "engine":  "google_news",
-        "q":       query,
-        "hl":      "de",
-        "num":     limit,
-        "after":   from_date,     # ISO-Datum, z. B. 2025-08-18
-        "before":  to_date,       # exklusive upper bound
-        "sort_by": "date",
-        "api_key": api_key
-    }
-
-    try:
-        results = GoogleSearch(params).get_dict()
-        return [(a["title"], a["link"])
-                for a in results.get("news_results", [])]
-    except Exception as e:
-        debug(f"SerpAPI-Fehler bei '{query}': {e}")
-        return []
-
-def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
-    """
-    Erstellt das PDF aus dem von OpenAI gelieferten JSON.
-    Erwartete Struktur seit 19-08-2025:
-      {
-        "headline": [...],
-        "sections": {
-          "moves":   ["[Quelle](URL) : Text", ...],
-          "news":    [...],
-          "analyst": [...],
-          "macro":   [...],
-          "special": [...]
-        }
-      }
-    """
-
-    # ------------------------------------------------------------------
-    # Safety-Net: garantiert gültiges Dict, auch wenn None o. Ä. kommt
-    # ------------------------------------------------------------------
+    # ----- Safety-Net -------------------------------------------------------
     if not isinstance(report, dict):
         report = {}
     report.setdefault("headline", [])
     report.setdefault("sections", {})
 
-    # ----- ab hier DEIN bisheriger PDF-Erstell-Code unverändert -------
-    ...
-    # 1) Fonts laden ---------------------------------------------------------
+    # ----- Fonts & Styles ---------------------------------------------------
     register_poppins()
     base_font = "Poppins" if "Poppins" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
-    bold_font = base_font + "-Bold" if base_font == "Poppins" else "Helvetica-Bold"
+    bold_font = "Poppins-Bold" if base_font == "Poppins" else "Helvetica-Bold"
 
-    # 2) Style-Vorlagen -------------------------------------------------------
     styles = getSampleStyleSheet()
     styles["Normal"].fontName = base_font
-    styles["Normal"].fontSize = 9.5        # 1 pt kleiner
+    styles["Normal"].fontSize = 9.5
     styles["Normal"].leading  = 13
 
-    h2 = ParagraphStyle(
-        "H2", parent=styles["Normal"],
-        fontName=bold_font, fontSize=11, leading=15,     # Überschrift 1 pt kleiner
-        spaceBefore=10, spaceAfter=5,                    # größerer Abstand
-        textColor=colors.HexColor("#0f2a5a")
-    )
-    bullet = ParagraphStyle(
-        "Bullet", parent=styles["Normal"],
-        leftIndent=10, bulletIndent=0, spaceAfter=4
-    )
+    h2 = ParagraphStyle("H2", parent=styles["Normal"],
+                        fontName=bold_font, fontSize=11, leading=15,
+                        spaceBefore=10, spaceAfter=5, textColor=colors.HexColor("#0f2a5a"))
+    bullet = ParagraphStyle("Bullet", parent=styles["Normal"],
+                            leftIndent=10, bulletIndent=0, spaceAfter=4)
 
-    def p_bullet(txt): return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
+    def p_bullet(txt: str) -> Paragraph:
+        return Paragraph(f"<bullet>&#8226;</bullet>{txt}", bullet)
 
-    # Markdown-Link ➞ HTML-Link
-    import re
     md_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)\s*:\s*(.*)")
+
     def md_to_para(md: str) -> Paragraph:
         m = md_re.match(md)
         if m:
@@ -309,45 +286,46 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
             return Paragraph(html, bullet)
         return p_bullet(md)
 
-    # 3) Logo + Header --------------------------------------------------------
-    img = ImageReader(io.BytesIO(logo_bytes)); iw, ih = img.getSize()
-    logo_w = 5.0 * cm
-    logo   = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
+    # ----- Header ----------------------------------------------------------
+    logo_img = ImageReader(io.BytesIO(logo_bytes))
+    iw, ih   = logo_img.getSize()
+    logo_w   = 5.0 * cm                        # fixes Maß
+    logo     = Image(io.BytesIO(logo_bytes), width=logo_w, height=ih * logo_w / iw)
 
-    title_style = ParagraphStyle(
-        "Title", parent=styles["Normal"],
-        alignment=2, fontName=bold_font, fontSize=14.5, leading=18
-    )
-    meta_style = ParagraphStyle(
-        "Meta", parent=styles["Normal"],
-        alignment=2, fontSize=8.5, textColor=colors.HexColor("#666")
-    )
+    title_style = ParagraphStyle("Title", parent=styles["Normal"],
+                                 alignment=2, fontName=bold_font,
+                                 fontSize=14.5, leading=18)
+    meta_style  = ParagraphStyle("Meta",  parent=styles["Normal"],
+                                 alignment=2, fontSize=8.5, textColor="#666")
 
     doc = SimpleDocTemplate(out_path, pagesize=A4,
                             leftMargin=1.7*cm, rightMargin=1.7*cm,
                             topMargin=1.5*cm, bottomMargin=1.6*cm)
+    story: list = []
 
-    story = []
-    header = Table(
+    header_tbl = Table(
         [[logo, Paragraph("Daily Investment Report", title_style)],
          ["",   Paragraph(f"Stand: {now_local().strftime('%d.%m.%Y, %H:%M')}", meta_style)]],
         colWidths=[logo_w+0.6*cm, 18.0*cm-(logo_w+0.6*cm)]
     )
-    header.setStyle(TableStyle([
-        ("VALIGN",(0,0),(-1,-1),"TOP"), ("ALIGN",(1,0),(1,0),"RIGHT"),
-        ("ALIGN",(1,1),(1,1),"RIGHT"), ("LEFTPADDING",(0,0),(-1,-1),0),
-        ("RIGHTPADDING",(0,0),(-1,-1),0)]))
-    story += [header, Spacer(1,6),
-              HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
+    header_tbl.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ALIGN",(1,0),(1,0),"RIGHT"),
+        ("ALIGN",(1,1),(1,1),"RIGHT"),
+        ("LEFTPADDING",(0,0),(-1,-1),0),
+        ("RIGHTPADDING",(0,0),(-1,-1),0),
+    ]))
+    story += [header_tbl, Spacer(1,6),
+              HRFlowable(color="#e6e6e6", thickness=0.6),
               Spacer(1,8)]
 
-    # 4) Schlagzeilen ---------------------------------------------------------
+    # ----- Schlagzeilen ----------------------------------------------------
     story.append(Paragraph("Was heute zählt", h2))
     for hl in report.get("headline", [])[:5]:
         story.append(p_bullet(hl))
     story.append(Spacer(1,8))
 
-    # 5) Abschnitte -----------------------------------------------------------
+    # ----- Abschnitte ------------------------------------------------------
     section_titles = {
         "moves":   "Kursbewegungen & Marktreaktionen – Tagesbewegung > ±3 %, inkl. Kurstreiber",
         "news":    "Unternehmensnachrichten – Zahlen, Gewinnwarnungen, M&A, etc.",
@@ -356,36 +334,36 @@ def build_pdf(out_path: str, logo_bytes: bytes, report: dict):
         "special": "Sondermeldungen – Sanktionen oder Embargos, falls betroffen"
     }
 
-    for key in ("moves", "news", "analyst", "macro", "special"):
+    for key in ("moves","news","analyst","macro","special"):
         items = report.get("sections", {}).get(key, [])
         if not items:
-            continue                             # Abschnitt ganz auslassen
+            continue
         story.append(Paragraph(section_titles[key], h2))
         for itm in items:
             story.append(md_to_para(itm))
         story.append(Spacer(1,8))
 
-    # 6) Footer ---------------------------------------------------------------
-    story += [HRFlowable(color=colors.HexColor("#e6e6e6"), thickness=0.6),
+    # ----- Footer ----------------------------------------------------------
+    story += [HRFlowable(color="#e6e6e6", thickness=0.6),
               Spacer(1,4),
               Paragraph("© INVESTORY – Alle Rechte vorbehalten. "
-                        "Keine Haftung für die Richtigkeit der Daten.", styles["Normal"])]
+                        "Keine Haftung für die Richtigkeit der Daten.",
+                        styles["Normal"])]
 
-    # 7) PDF schreiben --------------------------------------------------------
+    # ----- PDF schreiben ---------------------------------------------------
     doc.build(story)
 
-# --------------------------------------------------------------------------- #
-# Pipeline & CLI
-# --------------------------------------------------------------------------- #
-def run_pdf_pipeline():
-    report    = gen_report_data_via_openai()
-    out_path  = f"/tmp/Daily_Investment_Report_{now_local().strftime('%Y-%m-%d')}.pdf"
-    logo_data = fetch_bytes(LOGO_URL)
-    build_pdf(out_path, logo_data, report)
+# =========================================================================== #
+# 4. PIPELINE-EINTRITTSPUNKT
+# =========================================================================== #
+def run_pdf_pipeline() -> str:
+    report   = gen_report_data_via_openai()
+    out_path = f"/tmp/Daily_Investment_Report_{now_local().strftime('%Y-%m-%d')}.pdf"
+    logo_bin = fetch_bytes(LOGO_URL)
+    build_pdf(out_path, logo_bin, report)
 
-    # >>> Diese Zeile braucht der GitHub-Workflow
+    # → Der GitHub-Workflow liest diese Zeile aus dem Log
     print(out_path)
-
     return out_path
 
 if __name__ == "__main__":
