@@ -73,14 +73,32 @@ def gen_report_data_via_openai() -> dict:
     from_iso = prev_day.isoformat()   # z. B. 2025-08-18
     to_iso   = today.isoformat()      # bis jetzt
   
-    # ---- Artikel per SerpAPI holen ---------------------------------------
-    news_ctx = []
-    for tk in RELEVANT_TICKERS.split(",")[:20]:   # nur erste 20 Ticker
-        tk = tk.strip()
-        for title, url in search_news_serpapi(tk, from_iso, to_iso, limit=3):
-            news_ctx.append(f"* {tk} | {title} | {url}")
+# --------------------------------------------------------------------------- #
+# SerpAPI-Shortcut – holt 3 breite News-Abfragen (≈ 3 Credits)
+# --------------------------------------------------------------------------- #
+def fetch_top_news(from_iso: str, to_iso: str, limit_per_query: int = 15) -> list[tuple[str, str]]:
+    """
+    Liefert eine flache Liste (Titel, URL) mit den wichtigsten Markt-News
+    des Tages aus internationalen *und* Schweizer Quellen.
+    """
+    queries = [
+        # 1) internationale Leitmedien
+        "site:bloomberg.com OR site:ft.com OR site:reuters.com stocks today",
+        # 2) US-Tech & Macro
+        "site:cnbc.com OR site:wsj.com market today",
+        # 3) DACH / Schweiz
+        "site:nzz.ch OR site:fuw.ch OR site:handelszeitung.ch börse heute"
+    ]
 
-    context_news = "\n".join(news_ctx[:100])      # Prompt nicht zu groß
+    news: list[tuple[str, str]] = []
+    for q in queries:
+        news += search_news_serpapi(q, from_iso, to_iso, limit_per_query)
+    # Duplikate löschen – gleiche URL nur einmal
+    seen = set(); filtered = []
+    for title, url in news:
+        if url not in seen:
+            filtered.append((title, url)); seen.add(url)
+    return filtered[:40]          # hartes Oberlimit fürs Prompt
 
     # ── Prompt zusammenbauen ─────────────────────────────────────────────────
     prompt = f"""
