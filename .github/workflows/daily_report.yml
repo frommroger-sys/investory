@@ -53,7 +53,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests reportlab pillow pytz serpapi python-Levenshtein
+          # Falsches Paket entfernen (falls vorhanden)
+          pip uninstall -y serpapi || true
+          # Richtiges SerpApi-Paket (stellt 'from serpapi import GoogleSearch' bereit)
+          pip install google-search-results
+          # Weitere Abhängigkeiten
+          pip install requests reportlab pillow pytz python-Levenshtein
 
       # ------------------------------------------------------
       # 6) PDF erzeugen
