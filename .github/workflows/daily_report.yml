@@ -12,6 +12,7 @@ on:
     - cron: "0 4 * * 1-5"
     # Winterzeit: 05 UTC  → 06 CET
     - cron: "0 5 * * 1-5"
+  workflow_dispatch:   #  ←  MANUELLER TRIGGER
 
 # ------------------------------------------------------------
 # 2) Repository-Schreibrechte für gh-pages
